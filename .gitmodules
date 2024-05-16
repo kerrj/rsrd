@@ -1,0 +1,6 @@
+[submodule "dependencies/yumiplanning"]
+	path = dependencies/yumiplanning
+	url = https://github.com/BerkeleyAutomation/yumiplanning.git
+[submodule "dependencies/curobo"]
+	path = dependencies/curobo
+	url = https://github.com/NVlabs/curobo.git

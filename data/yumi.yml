@@ -1,0 +1,36 @@
+robot_cfg:
+  kinematics:
+    # usd_path: "FILL_THIS"
+    # usd_robot_root: "/robot"
+    # isaac_usd_path: ""
+    # usd_flip_joints: {}
+    # usd_flip_joint_limits: []
+
+    urdf_path: "dependencies/yumiplanning/yumi_description/urdf/yumi.urdf"
+    asset_root_path: "dependencies/yumiplanning/yumi_description"
+    
+    base_link: "base_link"
+    ee_link: "gripper_l_base"  # "end effector"
+    link_names: ["gripper_l_base", "gripper_r_base"]  # "additional links you may want to track -- useful for multi-robot or bimanual"
+    lock_joints: null
+    extra_links: null
+
+    
+    collision_link_names: null # List[str]
+    collision_spheres: null #
+    collision_sphere_buffer: 0.005 # float or Dict[str, float]
+    extra_collision_spheres: {}
+    self_collision_ignore: {} # Dict[str, List[str]]
+    self_collision_buffer: {} # Dict[str, float]
+
+    use_global_cumul: True
+    mesh_link_names: null # List[str]
+    external_asset_path: null # Use this to add path for externally located assets/robot folder.
+
+    cspace:
+      joint_names: [] # List[str]
+      retract_config: null # List[float]
+      null_space_weight: null # List[str]
+      cspace_distance_weight: null # List[str]
+      max_jerk: 500.0
+      max_acceleration: 15.0

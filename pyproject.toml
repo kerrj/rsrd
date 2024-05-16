@@ -1,0 +1,7 @@
+[project]
+name = "yumi-curobo"
+version = "0.0.1"
+
+dependencies=[
+    "viser"
+]
