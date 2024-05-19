@@ -4,3 +4,6 @@
 [submodule "dependencies/curobo"]
 	path = dependencies/curobo
 	url = https://github.com/NVlabs/curobo.git
+[submodule "dependencies/dexgrasp"]
+	path = dependencies/dexgrasp
+	url = git@github.com:BerkeleyAutomation/dexgrasp.git
