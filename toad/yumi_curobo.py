@@ -44,7 +44,7 @@ class YumiCurobo:
             raise RuntimeError("CUDA is not available -- curobo requires CUDA.")
 
         self._world_config = world_config
-        self._base_dir = Path(__file__).parent
+        self._base_dir = Path(__file__).parent.parent
         self._setup(target)
 
     def _setup(self, target):

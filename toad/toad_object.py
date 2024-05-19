@@ -114,7 +114,7 @@ class GraspableToadObject(ToadObject):
         
         Note that dexgrasp isn't open sourced -- but it should be possible to rewrite it if required."""
 
-        yaml_obj_loader = YamlLoader(basedir='dependencies/dexgrasp/cfg', data_prefix='dependencies/dexgrasp/')
+        yaml_obj_loader = YamlLoader(basedir='../dependencies/dexgrasp/cfg', data_prefix='../dependencies/dexgrasp/')
         sampler = yaml_obj_loader.load('parallel_jaw_grasp_sampling_policy')
         assert isinstance(sampler, ParallelJawGraspSamplingPolicy)
 
