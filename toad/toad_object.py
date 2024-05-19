@@ -7,6 +7,7 @@ import trimesh.repair
 import viser.transforms as vtf
 import open3d as o3d
 import dataclasses
+from pathlib import Path
 
 from autolab_core import RigidTransform
 
@@ -114,7 +115,12 @@ class GraspableToadObject(ToadObject):
         
         Note that dexgrasp isn't open sourced -- but it should be possible to rewrite it if required."""
 
-        yaml_obj_loader = YamlLoader(basedir='../dependencies/dexgrasp/cfg', data_prefix='../dependencies/dexgrasp/')
+        package_dir = Path(__file__).parent.parent
+
+        basedir = package_dir / Path('dependencies/dexgrasp/cfg')
+        data_prefix = package_dir / Path('dependencies/dexgrasp/')
+
+        yaml_obj_loader = YamlLoader(basedir=str(basedir), data_prefix=str(data_prefix))
         sampler = yaml_obj_loader.load('parallel_jaw_grasp_sampling_policy')
         assert isinstance(sampler, ParallelJawGraspSamplingPolicy)
 
