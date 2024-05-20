@@ -6,8 +6,8 @@ from typing import List, Literal, Dict, Any, Union, Optional
 
 import torch
 import numpy as np
-import tyro
 import viser
+import viser.transforms as vtf
 from viser.extras import ViserUrdf
 
 # cuRobo
@@ -19,6 +19,8 @@ from curobo.types.state import JointState
 from curobo.util_file import get_assets_path, get_robot_path, join_path, load_yaml
 from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig, IKResult
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig, MotionGenResult
+from curobo.geom.types import WorldConfig
+from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
 
 
 class YumiCurobo:
@@ -29,7 +31,9 @@ class YumiCurobo:
     _device: torch.device
     _curr_cfg: torch.Tensor
     _viser_urdf: ViserUrdf
-    _world_config: Dict[str, Any]
+    _world_config: Union[Dict[str, Any], WorldConfig]
+    _tooltip_to_gripper: vtf.SE3
+    _robot_world: RobotWorld
 
     _base_dir: Path
     """All paths are provided relative to the root of the repository."""
@@ -88,7 +92,20 @@ class YumiCurobo:
         self._motion_gen = MotionGen(motion_gen_config)
         self._motion_gen.warmup()
 
+        rw_config = RobotWorldConfig.load_from_config(
+            robot_config=robot_cfg,
+            world_model=self._world_config,
+        )
+        self._robot_world = RobotWorld(rw_config)
+
         self._viser_urdf = ViserUrdf(target, Path(urdf_path))
+
+        # Initialize the robot to the retracted position.
+        self.joint_pos = kin_model.retract_config
+        
+        # Get the tooltip-to-gripper offset.
+        # TODO remove hardcoding...
+        self._tooltip_to_gripper = vtf.SE3.from_translation(np.array([0.0, 0.0, 0.128]))
 
     @property
     def joint_pos(self):
@@ -105,7 +122,7 @@ class YumiCurobo:
         if joint_pos.shape == (16,):
             gripper_width = joint_pos[-2:]
         else:
-            gripper_width = [0.02, 0.02]
+            gripper_width = torch.Tensor([0.02, 0.02]).to(joint_pos.device)
         _joint_pos = torch.concat(
             (joint_pos[7:14], joint_pos[:7], gripper_width)
         ).detach().cpu().numpy()
@@ -141,6 +158,24 @@ class YumiCurobo:
 
         result = self._ik_solver.solve_batch(goal_l, link_poses={"gripper_l_base": goal_l, "gripper_r_base": goal_r})
         return result
+
+    def ik_batch(
+        self,
+        goal_l_wxyz_xyz: torch.Tensor,
+        goal_r_wxyz_xyz: torch.Tensor,
+    ) -> IKResult:
+        assert goal_l_wxyz_xyz.shape[-1] == 7 and goal_r_wxyz_xyz.shape[-1] == 7
+        assert goal_l_wxyz_xyz.shape == goal_r_wxyz_xyz.shape
+
+        goal_l_wxyz_xyz = goal_l_wxyz_xyz.to(self._device).float()
+        goal_r_wxyz_xyz = goal_r_wxyz_xyz.to(self._device).float()
+
+        goal_l = Pose(goal_l_wxyz_xyz[:, 4:], goal_l_wxyz_xyz[:, :4])
+        goal_r = Pose(goal_r_wxyz_xyz[:, 4:], goal_r_wxyz_xyz[:, :4])
+
+        result = self._ik_solver.solve_batch(goal_l, link_poses={"gripper_l_base": goal_l, "gripper_r_base": goal_r})
+        return result
+
 
     def motiongen(
         self,
@@ -195,8 +230,6 @@ if __name__ == "__main__":
     server = viser.ViserServer()
 
     import trimesh
-    mug_mesh = trimesh.load("mug.obj")
-
     urdf = YumiCurobo(
         server,
         world_config = {
@@ -206,17 +239,8 @@ if __name__ == "__main__":
                     "pose": [0.0, 0.0, -0.1, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
                 },
             },
-            "mesh": {
-                "mug": {
-                    "vertices": mug_mesh.vertices,
-                    "faces": mug_mesh.faces,
-                    "pose": [0.5, 0.0, 0.1, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
-                },
-            },
         }
     )  # ... can take a while to load...
-
-    server.add_mesh_trimesh("mug", mug_mesh, position=(0.5, 0.0, 0.1), wxyz=(1, 0, 0, 0))
 
 
     drag_l_handle = server.add_transform_controls(

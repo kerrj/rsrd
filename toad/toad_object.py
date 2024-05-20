@@ -9,14 +9,6 @@ import open3d as o3d
 import dataclasses
 from pathlib import Path
 
-from autolab_core import RigidTransform
-
-from dexgrasp import YamlLoader
-from dexgrasp.envs.states.objects import GraspableObject
-from dexgrasp.envs.states.states import GraspingState
-from dexgrasp.policies.parallel_jaw_grasp_sampling_policy import ParallelJawGraspSamplingPolicy
-from dexgrasp.envs.states.grippers import ParallelJawGripper
-
 
 @dataclasses.dataclass
 class ToadObject:
@@ -37,7 +29,7 @@ class ToadObject:
         
         vertices = pcd_object.vertices / scene_scale
         if (vertices.max(axis=0) - vertices.min(axis=0)).max() > 1.0:
-            scene_scale *= 10
+            scene_scale *= 20
 
         cluster_labels = pcd_object.metadata['_ply_raw']['vertex']['data']['cluster_labels'].astype(np.int32)
 
@@ -115,6 +107,19 @@ class GraspableToadObject(ToadObject):
         
         Note that dexgrasp isn't open sourced -- but it should be possible to rewrite it if required."""
 
+        # Move all imports here, so that they don't interfere with the main code.
+        # The logger... setup seems to change globally, so we try to avoid that.
+        import logging
+        curr_logging_level = logging.getLogger().getEffectiveLevel()
+
+        from autolab_core import RigidTransform
+
+        from dexgrasp import YamlLoader
+        from dexgrasp.envs.states.objects import GraspableObject
+        from dexgrasp.envs.states.states import GraspingState
+        from dexgrasp.policies.parallel_jaw_grasp_sampling_policy import ParallelJawGraspSamplingPolicy
+        from dexgrasp.envs.states.grippers import ParallelJawGripper
+
         package_dir = Path(__file__).parent.parent
 
         basedir = package_dir / Path('dependencies/dexgrasp/cfg')
@@ -130,11 +135,12 @@ class GraspableToadObject(ToadObject):
         assert isinstance(gripper, ParallelJawGripper)
 
         pose = RigidTransform(from_frame='obj', to_frame='world')
-        obj = GraspableObject("object", mesh, pose)
+        obj = GraspableObject("object", mesh, pose, mass=0.2)  # Making the mass reasonable is actually important, because this affects sorting.
         state = GraspingState(graspable_objects=[obj])
 
         # Get grasp pose, in gripper frame.
         grasps = sampler.ranked_actions(state, num_grasps, grippers=[gripper], perturb=True)
+        # print([g.confidence for g in grasps])
 
         # Convert grasp pose to tooltip frame.
         grasp_to_gripper = RigidTransform(
@@ -150,6 +156,9 @@ class GraspableToadObject(ToadObject):
             grasp_center = grasp_pose.translation
             grasp_axis = vtf.SO3.from_matrix(grasp_pose.rotation).wxyz
             grasp_tensor[i] = torch.tensor([*grasp_center, *grasp_axis])
+
+        # Reset the logging level...
+        logging.getLogger().setLevel(curr_logging_level)
 
         return grasp_tensor
 
