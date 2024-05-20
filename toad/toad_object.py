@@ -101,7 +101,7 @@ class GraspableToadObject(ToadObject):
         self.grasps = grasp_list
 
     @staticmethod
-    def _compute_grasps(mesh: trimesh.Trimesh, num_grasps: int = 1000) -> torch.Tensor:
+    def _compute_grasps(mesh: trimesh.Trimesh, num_grasps: int = 10) -> torch.Tensor:
         """Computes grasps for a single part. It's possible that the number of grasps
         returned is less than num_grasps, if they are filtereed due to collision or other reasons (e.g., too low score).
         
@@ -135,7 +135,7 @@ class GraspableToadObject(ToadObject):
         assert isinstance(gripper, ParallelJawGripper)
 
         pose = RigidTransform(from_frame='obj', to_frame='world')
-        obj = GraspableObject("object", mesh, pose, mass=0.2)  # Making the mass reasonable is actually important, because this affects sorting.
+        obj = GraspableObject("object", mesh, pose, mass=0.1)  # Making the mass reasonable is actually important, because this affects sorting.
         state = GraspingState(graspable_objects=[obj])
 
         # Get grasp pose, in gripper frame.
@@ -150,12 +150,16 @@ class GraspableToadObject(ToadObject):
             to_frame='gripper'
         )
 
+        # Make sure that the grasp tensor is exactly num_grasps long. IK will fail if it's not.
         grasp_tensor = torch.zeros((len(grasps), 7))
         for i, g in enumerate(grasps):
             grasp_pose = g.pose * grasp_to_gripper
             grasp_center = grasp_pose.translation
             grasp_axis = vtf.SO3.from_matrix(grasp_pose.rotation).wxyz
             grasp_tensor[i] = torch.tensor([*grasp_center, *grasp_axis])
+
+        grasp_tensor_padding = grasp_tensor[-1].expand(num_grasps - len(grasps), 7)
+        grasp_tensor = torch.cat([grasp_tensor, grasp_tensor_padding], dim=0)
 
         # Reset the logging level...
         logging.getLogger().setLevel(curr_logging_level)

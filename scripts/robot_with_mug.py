@@ -61,7 +61,7 @@ if __name__ == "__main__":
         with server.atomic():
             global traj
             # ... only like a hundred or so is viable as a batch...
-            grasps = toad.grasps[part_handle.value][:10] # [N_grasps, 7]
+            grasps = toad.grasps[part_handle.value]  # [N_grasps, 7]
             grasps_in_world = (
                 vtf.SE3.from_rotation_and_translation(
                     rotation=vtf.SO3(object_tf_handle.wxyz),
