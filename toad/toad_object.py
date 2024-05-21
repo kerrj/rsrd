@@ -19,6 +19,7 @@ class ToadObject:
     scene_scale: float = 1.0
     """Scale of the scene. Used to convert the object to metric scale. Default: 1.0.
     This is defined as: (point in metric) = (point in scene) / scene_scale."""
+    meshes: Optional[List[trimesh.Trimesh]] = None
 
     @staticmethod
     def from_ply(ply_file: str) -> ToadObject:
@@ -39,8 +40,26 @@ class ToadObject:
             scene_scale=scene_scale
         )
 
+    @staticmethod
+    def dummy_object() -> ToadObject:
+        cylinder_1 = trimesh.creation.cylinder(radius=0.01, height=0.1, sections=20)
+        cylinder_2 = trimesh.creation.cylinder(radius=0.01, height=0.1, sections=20, transform=trimesh.transformations.translation_matrix([0.05, 0.0, 0.0]))
+        points = np.concatenate([cylinder_1.vertices, cylinder_2.vertices], axis=0)
+        clusters = np.concatenate([np.zeros(len(cylinder_1.vertices)), np.ones(len(cylinder_2.vertices))], axis=0).astype(np.int32)
+        toad_obj = GraspableToadObject(
+            points=torch.tensor(points),
+            clusters=torch.tensor(clusters),
+            meshes=[cylinder_1, cylinder_2]
+        )
+
+        return toad_obj
+
+
     def to_mesh(self) -> List[trimesh.Trimesh]:
         """Returns a list of meshes, one for each part, in metric scale."""
+        if self.meshes is not None:
+            return self.meshes
+
         part_mesh_list = []
         for i in range(self.clusters.max() + 1):
             mask = self.clusters == i
@@ -65,6 +84,7 @@ class ToadObject:
             faces=np.asarray(mesh.triangles),
         )
         mesh.fix_normals()
+        mesh.fill_holes()
 
         for _ in range(3):
             mesh.subdivide()
