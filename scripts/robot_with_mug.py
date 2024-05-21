@@ -15,10 +15,13 @@ from toad.yumi_curobo import YumiCurobo
 if __name__ == "__main__":
     server = viser.ViserServer()
 
-    ply_file = "data/mug.ply"
+    # ply_file = "data/mug.ply"
+    ply_file = "data/mug_new.ply"
     # ply_file = "data/painter_sculpture.ply"
 
     toad = GraspableToadObject.from_ply(ply_file)
+    # toad =GraspableToadObject.dummy_object()
+    assert toad.grasps is not None
 
     part_handle = server.add_gui_number("Part", 0, 0, len(toad.grasps)-1, 1)
 
@@ -26,11 +29,18 @@ if __name__ == "__main__":
         name='object',
         scale=0.1,
     )
-    for i, mesh in enumerate(toad.to_mesh()):
-        server.add_mesh_trimesh(
+    def curry_mesh(mesh):
+        handle = server.add_mesh_trimesh(
             name=f'object/part_{i}',
             mesh=mesh
         )
+        @handle.on_click
+        def _(_):
+            print(f"Clicked on part {i}")
+            part_handle.value = i
+        return handle
+    for i, mesh in enumerate(toad.to_mesh()):
+        curry_mesh(mesh)
 
     # Create object for collision, and let the poses be updatable using the tf handle.
     object_mesh_list = [
@@ -42,14 +52,7 @@ if __name__ == "__main__":
         )
         for i, mesh in enumerate(toad.to_mesh())
     ]
-    @object_tf_handle.on_update
-    def _(_):
-        for mesh in object_mesh_list:
-            mesh.pose = [*object_tf_handle.position, *object_tf_handle.wxyz]
-
-    # from curobo.geom.sphere_fit import SphereFitType, fit_spheres_to_mesh
-    # object_mesh_list = sum([mesh.get_bounding_spheres(n_spheres=100, voxelize_method=SphereFitType.VOXEL_VOLUME) for mesh in object_mesh_list], [])
-    # world_config = WorldConfig.create_obb_world(WorldConfig(sphere=object_mesh_list))
+    from curobo.types.math import Pose
     world_config = WorldConfig(mesh=object_mesh_list)
 
     urdf = YumiCurobo(
@@ -57,10 +60,25 @@ if __name__ == "__main__":
         world_config=world_config
     )  # ... can take a while to load...
 
+    mesh_list = toad.to_mesh()
     def calculate_working_grasps():
         with server.atomic():
             global traj
-            # ... only like a hundred or so is viable as a batch...
+
+            # Need to clear the world cache, as per in: https://github.com/NVlabs/curobo/issues/263.
+            urdf._robot_world.clear_world_cache()
+            object_mesh_list = [
+                Mesh(
+                    name=f'object_{i}',
+                    vertices=mesh.vertices,
+                    faces=mesh.faces,
+                    pose=[*object_tf_handle.position, *object_tf_handle.wxyz]
+                )
+                for i, mesh in enumerate(mesh_list)
+            ]
+            world_config = WorldConfig(mesh=object_mesh_list)
+            urdf._robot_world.update_world(world_config)
+
             grasps = toad.grasps[part_handle.value]  # [N_grasps, 7]
             grasps_in_world = (
                 vtf.SE3.from_rotation_and_translation(
@@ -73,7 +91,7 @@ if __name__ == "__main__":
             )
             grasp_augmentations = (
                 vtf.SE3.from_rotation(
-                    rotation=vtf.SO3.from_x_radians(torch.linspace(-np.pi, np.pi, 6))
+                    rotation=vtf.SO3.from_x_radians(np.linspace(-np.pi, np.pi, 24)),
                 ).multiply(urdf._tooltip_to_gripper.inverse())
             )
 
@@ -88,6 +106,8 @@ if __name__ == "__main__":
             ik_results = urdf.ik_batch(
                 goal_l_wxyz_xyz=torch.Tensor(grasp_cand_list.wxyz_xyz),
                 goal_r_wxyz_xyz=torch.Tensor([[0, 1, 0, 0, 0.4, -0.2, 0.5]]).expand(grasp_cand_list.wxyz_xyz.shape[0], 7)
+                # goal_r_wxyz_xyz=torch.Tensor(grasp_cand_list.wxyz_xyz),
+                # goal_l_wxyz_xyz=torch.Tensor([[0, 1, 0, 0, 0.4, 0.2, 0.5]]).expand(grasp_cand_list.wxyz_xyz.shape[0], 7)
             )
             if not ik_results.success.any():
                 print("No IK solution found.")
@@ -100,6 +120,8 @@ if __name__ == "__main__":
             
             if len(traj) == 0:
                 print("No collision-free IK solution found.")
+                drag_slider.disabled = False
+                urdf.joint_pos = urdf.home_pos
                 return
 
             drag_slider.disabled = False
@@ -107,29 +129,43 @@ if __name__ == "__main__":
 
     traj = None
     drag_slider = server.add_gui_slider("Time", 0, 1, 0.01, 0, disabled=True)
+    import trimesh
     @drag_slider.on_update
     def _(_):
         assert traj is not None
         idx = int(drag_slider.value * (len(traj)-1))
         urdf.joint_pos = traj[idx]
 
+        # config = urdf.joint_pos.cuda()
+        # spheres = urdf._robot_kin_model.get_robot_as_spheres(config)[0]
+        # for si,sphere in enumerate(spheres):
+        #     pos = np.array(sphere.position)
+        #     radius = np.array(sphere.radius)
+        #     server.add_mesh_trimesh(f"spheres/sphere{si}",trimesh.creation.uv_sphere(radius),position=pos)
 
-    # @part_handle.on_update
-    # def _(_):
-    #     calculate_working_grasps()
+    # config = urdf.joint_pos.cuda()
+    # spheres = urdf._robot_kin_model.get_robot_as_spheres(config)[0]
+    # for si,sphere in enumerate(spheres):
+    #     pos = np.array(sphere.position)
+    #     radius = np.array(sphere.radius)
+    #     server.add_mesh_trimesh(f"spheres/sphere{si}",trimesh.creation.uv_sphere(radius),position=pos)
 
-    # @object_tf_handle.on_update
-    # def _(_):
-    #     calculate_working_grasps()
-
-    create_button = server.add_gui_button("Calculate Working Grasps")
-    @create_button.on_click
+    @part_handle.on_update
     def _(_):
-        create_button.disabled = True
-        start = time.time()
         calculate_working_grasps()
-        print(f"Time taken: {time.time() - start:.2f}s")
-        create_button.disabled = False
+
+    @object_tf_handle.on_update
+    def _(_):
+        calculate_working_grasps()
+
+    # create_button = server.add_gui_button("Calculate Working Grasps")
+    # @create_button.on_click
+    # def _(_):
+    #     create_button.disabled = True
+    #     start = time.time()
+    #     calculate_working_grasps()
+    #     print(f"Time taken: {time.time() - start:.2f}s")
+    #     create_button.disabled = False
 
 
 

@@ -34,6 +34,7 @@ class YumiCurobo:
     _world_config: Union[Dict[str, Any], WorldConfig]
     _tooltip_to_gripper: vtf.SE3
     _robot_world: RobotWorld
+    home_pos: torch.Tensor
 
     _base_dir: Path
     """All paths are provided relative to the root of the repository."""
@@ -75,7 +76,7 @@ class YumiCurobo:
             None,
             rotation_threshold=0.05,
             position_threshold=0.002,
-            num_seeds=200,
+            num_seeds=10,
             self_collision_check=True,
             self_collision_opt=False,
             tensor_args=tensor_args,
@@ -95,6 +96,7 @@ class YumiCurobo:
         rw_config = RobotWorldConfig.load_from_config(
             robot_config=robot_cfg,
             world_model=self._world_config,
+            collision_activation_distance=0.0,
         )
         self._robot_world = RobotWorld(rw_config)
 
@@ -102,6 +104,7 @@ class YumiCurobo:
 
         # Initialize the robot to the retracted position.
         self.joint_pos = kin_model.retract_config
+        self.home_pos = kin_model.retract_config
         
         # Get the tooltip-to-gripper offset.
         # TODO remove hardcoding...
@@ -205,12 +208,13 @@ class YumiCurobo:
 
         # get the current joint locations
         if start_state is None:
-            start_result = self.ik(start_l_pos, start_l_wxyz, start_r_pos, start_r_wxyz)
+            # start_result = self.ik(start_l_pos, start_l_wxyz, start_r_pos, start_r_wxyz)
 
-            # remove gripper joints (last two).
-            start_joints = start_result.js_solution.position[0]
-            assert start_joints.shape[-1] == 16
-            start_joints = start_joints[:, :-2]
+            # # remove gripper joints (last two).
+            # start_joints = start_result.js_solution.position[0]
+            # assert start_joints.shape[-1] == 16
+            # start_joints = start_joints[:, :-2]
+            start_joints = self.joint_pos.unsqueeze(0)
 
             assert type(start_joints) == torch.Tensor and len(start_joints.shape) == 2
             start_state = JointState.from_position(start_joints.cuda())
@@ -241,6 +245,9 @@ if __name__ == "__main__":
             },
         }
     )  # ... can take a while to load...
+
+    foo = urdf._robot_kin_model.get_robot_as_spheres(urdf.home_pos)
+    import pdb; pdb.set_trace()
 
 
     drag_l_handle = server.add_transform_controls(
@@ -300,10 +307,10 @@ if __name__ == "__main__":
                 waypoint_queue[0][i+1][0], waypoint_queue[0][i+1][1],
                 waypoint_queue[1][i][0], waypoint_queue[1][i][1],
                 waypoint_queue[1][i+1][0], waypoint_queue[1][i+1][1],
-                start_state=None if prev_start_state is None else prev_start_state[-1:],
+                start_state=None if prev_start_state is None else prev_start_state.get_interpolated_plan()[-1:],
             )
-            traj_pieces.append(prev_start_state.get_interpolated_plan().position.cpu().numpy())
-        traj = np.concatenate(traj_pieces)
+            traj_pieces.append(prev_start_state.get_interpolated_plan().position)
+        traj = torch.concat(traj_pieces)
         # traj = urdf.motiongen(
         #     pose_l.position.flatten(), pose_l.quaternion.flatten(),
         #     torch.Tensor(drag_l_handle.position), torch.Tensor(drag_l_handle.wxyz),
