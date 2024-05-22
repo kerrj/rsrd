@@ -12,15 +12,7 @@ def main():
     server = viser.ViserServer()
     urdf = YumiCurobo(
         server,
-        world_config = {
-            "cuboid": {
-                "table": {
-                    "dims": [1.0, 1.0, 0.2],  # x, y, z
-                    "pose": [0.0, 0.0, -0.1, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
-                },
-            },
-        }
-    )  # ... can take a while to load...
+    )
 
     # Create two handles, one for each end effector.
     drag_l_handle = server.add_transform_controls(
@@ -35,17 +27,23 @@ def main():
         position=(0.4, -0.2, 0.5),
         wxyz=(0, 1, 0, 0)
     )
+    server.add_grid(
+        name="grid",
+        width=1,
+        height=1,
+        position=(0.5, 0, 0),
+        section_size=0.05,
+    )
 
     # Update the joint positions based on the handle positions.
     # Run IK on the fly!
     def update_joints():
-        pos_l, quat_l = drag_l_handle.position, drag_l_handle.wxyz
-        pos_r, quat_r = drag_r_handle.position, drag_r_handle.wxyz
-        ik_result = urdf.ik(
-            torch.tensor(pos_l), torch.tensor(quat_l),
-            torch.tensor(pos_r), torch.tensor(quat_r),
-        )
-        urdf.joint_pos = ik_result.js_solution.position
+        joints_from_ik = urdf.ik(
+            torch.Tensor([*drag_l_handle.wxyz, *drag_l_handle.position]).view(1, 7),
+            torch.Tensor([*drag_r_handle.wxyz, *drag_r_handle.position]).view(1, 7),
+        ).js_solution.position
+        assert isinstance(joints_from_ik, torch.Tensor)
+        urdf.joint_pos = joints_from_ik
 
     @drag_r_handle.on_update
     def _(_):

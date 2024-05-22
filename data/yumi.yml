@@ -32,14 +32,14 @@ robot_cfg:
         "yumi_link_2_l": ["yumi_link_3_l"],
         "yumi_link_3_l": ["yumi_link_4_l"],
         "yumi_link_4_l": ["yumi_link_5_l"],
-        "yumi_link_5_l": ["yumi_link_6_l"],
+        "yumi_link_5_l": ["yumi_link_6_l", "yumi_link_7_l"],
         "yumi_link_6_l": ["yumi_link_7_l","gripper_l_base"],
         
         "yumi_link_1_r": ["yumi_link_2_r"],
         "yumi_link_2_r": ["yumi_link_3_r"],
         "yumi_link_3_r": ["yumi_link_4_r"],
         "yumi_link_4_r": ["yumi_link_5_r"],
-        "yumi_link_5_r": ["yumi_link_6_r"],
+        "yumi_link_5_r": ["yumi_link_6_r", "yumi_link_7_r"],
         "yumi_link_6_r": ["yumi_link_7_r","gripper_r_base"],
         "base_link": ["yumi_link_1_l","yumi_link_1_r"]
       }
@@ -331,18 +331,6 @@ robot_cfg:
         - "center": [0.011, 0.003, 0.044]
           "radius": 0.039
       gripper_r_finger_r:
-        # - "center": [-0.005, 0.004, 0.013]
-        #   "radius": 0.015
-        # - "center": [-0.005, 0.009, 0.023]
-        #   "radius": 0.014
-        # - "center": [-0.005, 0.005, 0.03]
-        #   "radius": 0.014
-        # - "center": [-0.004, 0.011, 0.011]
-        #   "radius": 0.014
-        # - "center": [-0.005, 0.003, 0.023]
-        #   "radius": 0.014
-        # - "center": [-0.004, 0.005, 0.042]
-        #   "radius": 0.014
         - "center": [-0.004130744677933151, 0.006228838847905338, 0.047243330328664304]
           "radius": 0.006
         - "center": [-0.006029172979477521, -0.00020971725791269904, 0.013192425191993828]
@@ -358,18 +346,6 @@ robot_cfg:
         - "center": [-0.00493790785325833, 0.009317143809622211, 0.03716460041510859]
           "radius": 0.007
       gripper_r_finger_l:
-        # - "center": [-0.005, 0.004, 0.013]
-        #   "radius": 0.015
-        # - "center": [-0.005, 0.009, 0.023]
-        #   "radius": 0.014
-        # - "center": [-0.005, 0.005, 0.03]
-        #   "radius": 0.014
-        # - "center": [-0.004, 0.011, 0.011]
-        #   "radius": 0.014
-        # - "center": [-0.005, 0.003, 0.023]
-        #   "radius": 0.014
-        # - "center": [-0.004, 0.005, 0.042]
-        #   "radius": 0.014
         - "center": [-0.004130744677933151, 0.006228838847905338, 0.047243330328664304]
           "radius": 0.006
         - "center": [-0.006029172979477521, -0.00020971725791269904, 0.013192425191993828]
