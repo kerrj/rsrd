@@ -4,19 +4,26 @@ import torch
 import numpy as np
 import trimesh
 import trimesh.repair
+import trimesh.creation
 import viser.transforms as vtf
 import open3d as o3d
 import dataclasses
 from pathlib import Path
 
+from curobo.geom.types import Mesh, Sphere, WorldConfig
 
-@dataclasses.dataclass
+
+@dataclasses.dataclass(frozen=True)
 class ToadObject:
     points: torch.Tensor
     """Gaussian centers of the object. Shape: (N, 3)."""
     clusters: torch.Tensor
     """Cluster labels for each point. Shape: (N,)."""
-    scene_scale: float = 1.0
+    meshes: List[trimesh.Trimesh]
+    """List of meshes, one for each cluster, with smoothed geometry."""
+    meshes_orig: List[trimesh.Trimesh]
+    """List of meshes, one for each cluster."""
+    scene_scale: float
     """Scale of the scene. Used to convert the object to metric scale. Default: 1.0.
     This is defined as: (point in metric) = (point in scene) / scene_scale."""
 
@@ -33,25 +40,40 @@ class ToadObject:
 
         cluster_labels = pcd_object.metadata['_ply_raw']['vertex']['data']['cluster_labels'].astype(np.int32)
 
+        part_mesh_list, part_mesh_orig_list = [], []
+        for i in range(cluster_labels.max() + 1):
+            mask = cluster_labels == i
+            part_vertices = np.array(pcd_object.vertices[mask])
+            part_mesh, part_mesh_orig = ToadObject._points_to_mesh(part_vertices)
+            part_mesh.vertices /= scene_scale
+            part_mesh_orig.vertices /= scene_scale
+            part_mesh_list.append(part_mesh)
+            part_mesh_orig_list.append(part_mesh_orig)
+
         return ToadObject(
             points=torch.tensor(pcd_object.vertices),
             clusters=torch.tensor(cluster_labels),
-            scene_scale=scene_scale
+            scene_scale=scene_scale,
+            meshes=part_mesh_list,
+            meshes_orig=part_mesh_orig_list
         )
 
-    def to_mesh(self) -> List[trimesh.Trimesh]:
-        """Returns a list of meshes, one for each part, in metric scale."""
-        part_mesh_list = []
-        for i in range(self.clusters.max() + 1):
-            mask = self.clusters == i
-            part_vertices = np.array(self.points[mask])
-            part_mesh = self._points_to_mesh(part_vertices)
-            part_mesh.vertices /= self.scene_scale
-            part_mesh_list.append(part_mesh)
+    @staticmethod
+    def dummy_object() -> ToadObject:
+        cylinder_1 = trimesh.creation.cylinder(radius=0.01, height=0.1, sections=20)
+        cylinder_2 = trimesh.creation.cylinder(radius=0.01, height=0.1, sections=20, transform=trimesh.transformations.translation_matrix([0.05, 0.0, 0.0]))
+        points = np.concatenate([cylinder_1.vertices, cylinder_2.vertices], axis=0)
+        clusters = np.concatenate([np.zeros(len(cylinder_1.vertices)), np.ones(len(cylinder_2.vertices))], axis=0).astype(np.int32)
+        toad_obj = ToadObject(
+            points=torch.tensor(points),
+            clusters=torch.tensor(clusters),
+            meshes=[cylinder_1, cylinder_2],
+            scene_scale=1.0,
+        )
+        return toad_obj
 
-        return part_mesh_list
-
-    def _points_to_mesh(self, vertices: np.ndarray) -> trimesh.Trimesh:
+    @staticmethod
+    def _points_to_mesh(vertices: np.ndarray) -> trimesh.Trimesh:
         """Converts a point cloud to a mesh, using alpha hulls and smoothing."""
         points = o3d.geometry.PointCloud()
         points.points = o3d.utility.Vector3dVector(vertices)
@@ -65,26 +87,64 @@ class ToadObject:
             faces=np.asarray(mesh.triangles),
         )
         mesh.fix_normals()
+        mesh.fill_holes()
 
-        for _ in range(3):
-            mesh.subdivide()
+        mesh_orig = mesh.copy()
+        for _ in range(2):
+            mesh = mesh.subdivide()
             trimesh.smoothing.filter_mut_dif_laplacian(mesh, lamb=0.2, iterations=10)
         
-        return mesh
+        print(f"Mesh: {mesh_orig} -> {mesh}")
+        return mesh, mesh_orig
+
+    def to_world_config(self, poses_wxyz_xyz: Optional[List[np.ndarray]] = None) -> List[Mesh]:
+        if poses_wxyz_xyz is None:
+            poses_wxyz_xyz = [np.array([1, 0, 0, 0, 0, 0, 0])] * len(self.meshes)
+
+        object_mesh_list = [
+            Mesh(
+                name=f'object_{i}',
+                vertices=mesh.vertices,
+                faces=mesh.faces,
+                pose=[*poses_wxyz_xyz[i][4:], *poses_wxyz_xyz[i][:4]] # xyz, wxyz
+            )
+            for i, mesh in enumerate(self.meshes_orig)
+        ]
+        return object_mesh_list
+
+    def to_world_config_spheres(self, poses_wxyz_xyz: Optional[List[np.ndarray]] = None) -> List[Sphere]:
+        object_mesh_list = self.to_world_config(poses_wxyz_xyz)
+        object_sphere_list = [
+            mesh.get_bounding_spheres(n_spheres=100)
+            for mesh in object_mesh_list
+        ]
+        # flatten the list of lists
+        object_sphere_list = [item for sublist in object_sphere_list for item in sublist]
+        return object_sphere_list
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class GraspableToadObject(ToadObject):
-    grasps: Optional[List[torch.Tensor]] = None
+    grasps: List[torch.Tensor]
     """List of grasps, of length N_clusters. Each element is a tensor of shape (N_grasps, 7), for grasp center and axis (quat)."""
 
     @staticmethod
     def from_ply(ply_file: str) -> GraspableToadObject:
         toad = ToadObject.from_ply(ply_file)
+        # Compute grasps. :-)
+        mesh_list = toad.meshes
+        grasp_list = []
+        for mesh in mesh_list:
+            grasps = GraspableToadObject._compute_grasps(mesh)
+            grasp_list.append(grasps)
+
         return GraspableToadObject(
             points=toad.points,
             clusters=toad.clusters,
-            scene_scale=toad.scene_scale
+            meshes=toad.meshes,
+            meshes_orig=toad.meshes_orig,
+            scene_scale=toad.scene_scale,
+            grasps=grasp_list
         )
 
     def __post_init__(self):
@@ -93,12 +153,12 @@ class GraspableToadObject(ToadObject):
             return
 
         # Compute grasps. :-)
-        mesh_list = self.to_mesh()
+        mesh_list = self.meshes
         grasp_list = []
         for mesh in mesh_list:
             grasps = self._compute_grasps(mesh)
             grasp_list.append(grasps)
-        self.grasps = grasp_list
+        self.__setattr__('grasps', grasp_list)
 
     @staticmethod
     def _compute_grasps(mesh: trimesh.Trimesh, num_grasps: int = 10) -> torch.Tensor:
@@ -174,6 +234,34 @@ class GraspableToadObject(ToadObject):
         bar.visual.vertex_colors = [255, 0, 0, 255]
         return bar
 
+    @staticmethod
+    def to_gripper_frame(
+        grasps_tensor: torch.Tensor,
+        tooltip_to_gripper: vtf.SE3,
+        num_rotations: int = 24,
+    ) -> vtf.SE3:
+        """Put grasps in the tooltip frame to the gripper frame, using provided tooltip_to_gripper offset.
+        , and also augment grasps by rotating them around the z-axis of the tooltip frame."""
+        grasps = vtf.SE3.from_rotation_and_translation(
+            rotation=vtf.SO3(grasps_tensor[:, 3:].cpu().numpy()),
+            translation=grasps_tensor[:, :3].cpu().numpy()
+        )
+        augs = (
+            vtf.SE3.from_rotation(
+                rotation=vtf.SO3.from_x_radians(
+                    np.linspace(-np.pi, np.pi, num_rotations)
+                ),
+            ).multiply(tooltip_to_gripper.inverse())
+        )
+
+        len_grasps = grasps.wxyz_xyz.shape[0]
+        len_augs = augs.wxyz_xyz.shape[0]
+
+        augs_expanded = vtf.SE3(np.tile(augs.wxyz_xyz, (len_grasps, 1)))
+        grasps_expanded = vtf.SE3(np.repeat(grasps.wxyz_xyz, len_augs, axis=0))
+
+        return grasps_expanded.multiply(augs_expanded)
+
 
 if __name__ == "__main__":
     import viser
@@ -182,7 +270,7 @@ if __name__ == "__main__":
     ply_file = "data/mug.ply"
     toad = GraspableToadObject.from_ply(ply_file)
 
-    for i, mesh in enumerate(toad.to_mesh()):
+    for i, mesh in enumerate(toad.meshes):
         grasps = toad.grasps[i]
         server.add_mesh_trimesh(
             f"object/{i}/mesh", mesh
