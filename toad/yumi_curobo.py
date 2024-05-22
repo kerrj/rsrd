@@ -128,16 +128,29 @@ class YumiCurobo:
         self._ik_solver_batch_size = ik_solver_batch_size
 
         # Set up motion generation.
+        # Note that this ignores collision for now, for speed.
         motion_gen_config = MotionGenConfig.load_from_robot_config(
             robot_cfg,
             None,
-            interpolation_dt=0.01,
+            rotation_threshold=0.05,
+            position_threshold=0.005,
+            num_ik_seeds=10,
+            num_graph_seeds=4,
+            num_trajopt_seeds=4,
+            interpolation_dt=0.25,
+            trajopt_dt=0.25,
             collision_activation_distance=0.0,
+            interpolation_steps=100,
             world_coll_checker=self._robot_world.world_model,
+            use_cuda_graph=True,
         )
         self._motion_gen = MotionGen(motion_gen_config)
         self._motion_gen_batch_size = motion_gen_batch_size
-        self._motion_gen.warmup(batch=motion_gen_batch_size)
+        self._motion_gen.warmup(
+            batch=motion_gen_batch_size,
+            warmup_js_trajopt=False,
+            parallel_finetune=False,
+        )
 
         self._viser_urdf = ViserUrdf(target, Path(urdf_path))
 
@@ -253,6 +266,37 @@ class YumiCurobo:
 
         return result_list
 
+    def get_js_from_ik(
+        self,
+        ik_result_list: List[IKResult],
+        filter_success: bool = True,
+        filter_collision: bool = True,
+    ) -> Optional[torch.Tensor]:
+        ik_result_list = list(filter(lambda x: x.success.any(), ik_result_list))
+        if len(ik_result_list) == 0:
+            return None
+
+        traj_all = []
+        for ik_results in ik_result_list:
+            traj = ik_results.js_solution[ik_results.success].position
+            assert isinstance(traj, torch.Tensor) and len(traj.shape) == 2
+            if traj.shape[0] == 0:
+                continue
+            d_world, d_self = (
+                urdf._robot_world.get_world_self_collision_distance_from_joint_trajectory(
+                    traj.unsqueeze(1)
+                )
+            )
+            traj = traj[(d_world.squeeze() <= 0) & (d_self.squeeze() <= 0)]
+            if len(traj) > 0:
+                traj_all.append(traj.squeeze(1))
+
+        if len(traj_all) == 0:
+            print("No collision-free IK solution found.")
+            return None
+
+        return torch.cat(traj_all)
+
     def motiongen(
         self,
         goal_l_wxyz_xyz: torch.Tensor,
@@ -260,16 +304,19 @@ class YumiCurobo:
         start_state: Optional[JointState] = None,
         start_l_wxyz_xyz: Optional[torch.Tensor] = None,
         start_r_wxyz_xyz: Optional[torch.Tensor] = None,
-    ) -> MotionGenResult:
+    ) -> List[MotionGenResult]:
         # Takes around ~0.1 seconds
         assert len(goal_l_wxyz_xyz.shape) == 2 and len(goal_r_wxyz_xyz.shape) == 2
-        assert goal_l_wxyz_xyz.shape[0] == goal_r_wxyz_xyz.shape[0] == self._motion_gen_batch_size
+        assert goal_l_wxyz_xyz.shape[0] % self._motion_gen_batch_size == 0
+        assert goal_r_wxyz_xyz.shape[0] % self._motion_gen_batch_size == 0
 
         if start_state is None:
             if (start_l_wxyz_xyz is not None and start_r_wxyz_xyz is not None):
                 start_l_wxyz_xyz = start_l_wxyz_xyz.to(self.device).float()
                 start_r_wxyz_xyz = start_r_wxyz_xyz.to(self.device).float()
-                start_state = self.ik(start_l_wxyz_xyz, start_r_wxyz_xyz).js_solution
+                ik_result = self.ik(start_l_wxyz_xyz, start_r_wxyz_xyz)
+                joint_state_list = [ik_result[i].js_solution for i in range(len(ik_result))]
+                start_state = JointState.from_position(torch.cat([js.position for js in joint_state_list], dim=0))  # type: ignore
             else:
                 raise ValueError("Either start_state or start_l_wxyz_xyz and start_r_wxyz_xyz must be provided.")
 
@@ -277,8 +324,8 @@ class YumiCurobo:
         start_joints = start_state.position
         assert isinstance(start_joints, torch.Tensor)
         if len(start_joints.shape) == 1:
-            start_joints = start_joints.expand(self._motion_gen_batch_size, -1)
-        assert len(start_joints.shape) == 2 and start_joints.shape[0] == self._motion_gen_batch_size
+            start_joints = start_joints.expand(goal_l_wxyz_xyz.shape[0], -1)
+        assert len(start_joints.shape) == 2 and start_joints.shape[0] == goal_l_wxyz_xyz.shape[0]
         if start_joints.shape[-1] == 16:
             start_joints = start_joints[:, :14]
         start_state = JointState.from_position(start_joints.cuda())
@@ -291,14 +338,21 @@ class YumiCurobo:
         goal_r_pose = Pose(goal_r_wxyz_xyz[:, 4:], goal_r_wxyz_xyz[:, :4])
 
         # get the current joint locations
-        result = self._motion_gen.plan_batch(
-            start_state,
-            goal_l_pose,
-            MotionGenPlanConfig(max_attempts=10, parallel_finetune=True),
-            link_poses={"gripper_l_base": goal_l_pose, "gripper_r_base": goal_r_pose},  # type: ignore
-        )
-        print(result)
-        return result
+        result_list = []
+        print(start_state.shape, goal_l_pose.shape, goal_r_pose.shape)
+        for i in range(0, goal_l_wxyz_xyz.shape[0], self._motion_gen_batch_size):
+            result = self._motion_gen.plan_batch(
+                start_state[i:i+self._motion_gen_batch_size],
+                goal_l_pose[i:i+self._motion_gen_batch_size],
+                MotionGenPlanConfig(max_attempts=10, parallel_finetune=True),
+                link_poses={
+                    "gripper_l_base": goal_l_pose[i:i+self._motion_gen_batch_size],
+                    "gripper_r_base": goal_r_pose[i:i+self._motion_gen_batch_size]
+                },  # type: ignore
+            )
+            result_list.append(result)
+
+        return result_list
 
 
 if __name__ == "__main__":

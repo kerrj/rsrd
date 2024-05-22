@@ -10,7 +10,7 @@ import open3d as o3d
 import dataclasses
 from pathlib import Path
 
-from curobo.geom.types import Mesh, WorldConfig
+from curobo.geom.types import Mesh, Sphere, WorldConfig
 
 
 @dataclasses.dataclass(frozen=True)
@@ -20,6 +20,8 @@ class ToadObject:
     clusters: torch.Tensor
     """Cluster labels for each point. Shape: (N,)."""
     meshes: List[trimesh.Trimesh]
+    """List of meshes, one for each cluster, with smoothed geometry."""
+    meshes_orig: List[trimesh.Trimesh]
     """List of meshes, one for each cluster."""
     scene_scale: float
     """Scale of the scene. Used to convert the object to metric scale. Default: 1.0.
@@ -38,19 +40,22 @@ class ToadObject:
 
         cluster_labels = pcd_object.metadata['_ply_raw']['vertex']['data']['cluster_labels'].astype(np.int32)
 
-        part_mesh_list = []
+        part_mesh_list, part_mesh_orig_list = [], []
         for i in range(cluster_labels.max() + 1):
             mask = cluster_labels == i
             part_vertices = np.array(pcd_object.vertices[mask])
-            part_mesh = ToadObject._points_to_mesh(part_vertices)
+            part_mesh, part_mesh_orig = ToadObject._points_to_mesh(part_vertices)
             part_mesh.vertices /= scene_scale
+            part_mesh_orig.vertices /= scene_scale
             part_mesh_list.append(part_mesh)
+            part_mesh_orig_list.append(part_mesh_orig)
 
         return ToadObject(
             points=torch.tensor(pcd_object.vertices),
             clusters=torch.tensor(cluster_labels),
             scene_scale=scene_scale,
-            meshes=part_mesh_list
+            meshes=part_mesh_list,
+            meshes_orig=part_mesh_orig_list
         )
 
     @staticmethod
@@ -84,11 +89,13 @@ class ToadObject:
         mesh.fix_normals()
         mesh.fill_holes()
 
-        for _ in range(3):
-            mesh.subdivide()
+        mesh_orig = mesh.copy()
+        for _ in range(2):
+            mesh = mesh.subdivide()
             trimesh.smoothing.filter_mut_dif_laplacian(mesh, lamb=0.2, iterations=10)
         
-        return mesh
+        print(f"Mesh: {mesh_orig} -> {mesh}")
+        return mesh, mesh_orig
 
     def to_world_config(self, poses_wxyz_xyz: Optional[List[np.ndarray]] = None) -> List[Mesh]:
         if poses_wxyz_xyz is None:
@@ -101,9 +108,19 @@ class ToadObject:
                 faces=mesh.faces,
                 pose=[*poses_wxyz_xyz[i][4:], *poses_wxyz_xyz[i][:4]] # xyz, wxyz
             )
-            for i, mesh in enumerate(self.meshes)
+            for i, mesh in enumerate(self.meshes_orig)
         ]
         return object_mesh_list
+
+    def to_world_config_spheres(self, poses_wxyz_xyz: Optional[List[np.ndarray]] = None) -> List[Sphere]:
+        object_mesh_list = self.to_world_config(poses_wxyz_xyz)
+        object_sphere_list = [
+            mesh.get_bounding_spheres(n_spheres=100)
+            for mesh in object_mesh_list
+        ]
+        # flatten the list of lists
+        object_sphere_list = [item for sublist in object_sphere_list for item in sublist]
+        return object_sphere_list
 
 
 @dataclasses.dataclass(frozen=True)
@@ -125,6 +142,7 @@ class GraspableToadObject(ToadObject):
             points=toad.points,
             clusters=toad.clusters,
             meshes=toad.meshes,
+            meshes_orig=toad.meshes_orig,
             scene_scale=toad.scene_scale,
             grasps=grasp_list
         )

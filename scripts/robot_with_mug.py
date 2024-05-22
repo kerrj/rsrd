@@ -48,7 +48,7 @@ if __name__ == "__main__":
         server,
         world_config=world_config,
         ik_solver_batch_size=240,
-        motion_gen_batch_size=4
+        motion_gen_batch_size=12,
     )  # ... can take a while to load...
 
     mesh_list = toad.meshes
@@ -77,30 +77,14 @@ if __name__ == "__main__":
                 goal_l_wxyz_xyz=goal_l_wxyz_xyz,
                 goal_r_wxyz_xyz=goal_r_wxyz_xyz,
             )
-
-            ik_result_list = list(filter(lambda x: x.success.any(), ik_result_list))
-            if len(ik_result_list) == 0:
-                print("No IK solution found.")
+            traj = urdf.get_js_from_ik(ik_result_list)
+            if traj is None:
+                print("No solution found.")
                 return
 
-            traj_all = []
-            for ik_results in ik_result_list:
-                traj = ik_results.js_solution[ik_results.success].position
-                assert isinstance(traj, torch.Tensor) and len(traj.shape) == 2
-                if traj.shape[0] == 0:
-                    continue
-                d_world, d_self = urdf._robot_world.get_world_self_collision_distance_from_joint_trajectory(traj.unsqueeze(1))
-                traj = traj[(d_world.squeeze() <= 0) & (d_self.squeeze() <= 0)]
-                if len(traj) > 0:
-                    traj_all.append(traj.squeeze(1))
+            drag_slider.disabled = False
+            urdf.joint_pos = urdf.home_pos
 
-            if len(traj_all) == 0:
-                print("No collision-free IK solution found.")
-                drag_slider.disabled = False
-                urdf.joint_pos = urdf.home_pos
-                return
-
-            traj = torch.cat(traj_all, dim=0)
             print(f"Time taken: {time.time() - start:.2f}s")
 
             drag_slider.disabled = False
