@@ -98,11 +98,14 @@ class RigidGroupOptimizer:
     pose_lr_final: float = .0005
     mask_hands: bool = False
     
-    def __init__(self, dig_model: DiGModel, dino_loader: DinoDataloader, init_c2o: Cameras, group_masks: List[torch.Tensor], group_labels: torch.Tensor, render_lock = nullcontext()):
+    def __init__(self, dig_model: DiGModel, dino_loader: DinoDataloader, init_c2o: Cameras,
+                  group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float,
+                    render_lock = nullcontext()):
         """
         This one takes in a list of gaussian ID masks to optimize local poses for
         Each rigid group can be optimized independently, with no skeletal constraints
         """
+        self.dataset_scale = dataset_scale
         self.tape = None
         self.dig_model = dig_model
         #detach all the params to avoid retain_graph issue
@@ -205,6 +208,7 @@ class RigidGroupOptimizer:
                 best_outputs = dig_outputs
                 best_pose = whole_pose_adj
         self.reset_transforms()
+        # convert best_pose from world coord delta to obj2cam transform
         return xs,ys,best_outputs, best_pose, renders,best_pix
 
     def step(self, niter = 1, use_depth = True, use_rgb = False, metric_depth = False):
@@ -235,7 +239,7 @@ class RigidGroupOptimizer:
             loss = pix_loss.norm(dim=-1).mean()
             if use_depth and self.use_depth:
                 if metric_depth:
-                    physical_depth = dig_outputs['depth']/pipeline.datamanager.train_dataset._dataparser_outputs.dataparser_scale
+                    physical_depth = dig_outputs['depth']/self.dataset_scale
                     valids = object_mask & (~self.frame_depth.isnan())
                     if self.mask_hands:
                         valids = valids & self.hand_mask.unsqueeze(-1)
