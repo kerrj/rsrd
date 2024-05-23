@@ -193,6 +193,12 @@ class YumiCurobo:
 
         self._curr_cfg = joint_pos
 
+    def get_left_joints(self) -> torch.Tensor:
+        return self.joint_pos[:7]
+
+    def get_right_joints(self) -> torch.Tensor:
+        return self.joint_pos[7:14]
+
     def update_world(self, world_config: WorldConfig):
         # Need to clear the world cache, as per in: https://github.com/NVlabs/curobo/issues/263.
         self._robot_world.clear_world_cache()
@@ -239,6 +245,7 @@ class YumiCurobo:
         self,
         goal_l_wxyz_xyz: torch.Tensor,
         goal_r_wxyz_xyz: torch.Tensor,
+        initial_js: Optional[torch.Tensor] = None,
     ) -> List[IKResult]:
         """Solve IK for both arms simultaneously."""
         assert len(goal_l_wxyz_xyz.shape) == 2 and len(goal_r_wxyz_xyz.shape) == 2
@@ -253,6 +260,9 @@ class YumiCurobo:
         goal_l = Pose(goal_l_wxyz_xyz[:, 4:], goal_l_wxyz_xyz[:, :4])
         goal_r = Pose(goal_r_wxyz_xyz[:, 4:], goal_r_wxyz_xyz[:, :4])
 
+        if initial_js is not None:
+            initial_js = initial_js.to(self.device).float()
+
         result_list = []
         for i in range(0, goal_l_wxyz_xyz.shape[0], self._ik_solver_batch_size):
             result = self._ik_solver.solve_batch(
@@ -260,7 +270,8 @@ class YumiCurobo:
                 link_poses={
                     "gripper_l_base": goal_l[i:i+self._ik_solver_batch_size],
                     "gripper_r_base": goal_r[i:i+self._ik_solver_batch_size]
-                }
+                },
+                seed_config=initial_js.expand(1, 1, -1),
             )
             result_list.append(result)
 
