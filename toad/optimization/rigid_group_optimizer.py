@@ -23,6 +23,7 @@ from nerfstudio.engine.schedulers import ExponentialDecayScheduler,ExponentialDe
 import warp as wp
 from toad.optimization.atap_loss import ATAPLoss
 from toad.utils import *
+import viser.transforms as vtf
 
 def quatmul(q0:torch.Tensor,q1:torch.Tensor):
     w0, x0, y0, z0 = torch.unbind(q0, dim=-1)
@@ -125,22 +126,24 @@ class RigidGroupOptimizer:
         self.connectivity_weights = torch.nn.Parameter(-torch.ones(len(group_masks),len(group_masks),dtype=torch.float32,device='cuda'))
         self.optimizer = torch.optim.Adam([self.pose_deltas],lr=self.pose_lr)
         # self.weights_optimizer = torch.optim.Adam([self.connectivity_weights],lr=.001)
-        self.init_means = dig_model.gauss_params['means'].detach().clone()
-        self.init_quats = dig_model.gauss_params['quats'].detach().clone()
         self.keyframes = []
         # lock to prevent blocking the render thread if provided
         self.render_lock = render_lock
         if self.use_atap:
             self.atap = ATAPLoss(dig_model,group_masks,group_labels)
+        self.init_c2o = deepcopy(init_c2o).to('cuda')
+        self._init_centroids()
+
+    def _init_centroids(self):
+        self.init_means = self.dig_model.gauss_params['means'].detach().clone()
+        self.init_quats = self.dig_model.gauss_params['quats'].detach().clone()
         self.centroids = torch.empty((self.dig_model.num_points,3),dtype=torch.float32,device='cuda',requires_grad=False)
         for i,mask in enumerate(self.group_masks):
             with torch.no_grad():
                 self.centroids[mask] = self.dig_model.gauss_params['means'][mask].mean(dim=0)
-        self.init_c2o = deepcopy(init_c2o).to('cuda')
-    
-    def initialize_obj_pose(self, niter = 200, n_seeds = 6, render = True):
+
+    def initialize_obj_pose(self, niter = 200, n_seeds = 6, render = False):
         renders = []
-        import viser.transforms as vtf
         def try_opt(start_pose_adj):
             "tries to optimize the pose, returns None if failed, otherwise returns outputs and loss"
             self.reset_transforms()
@@ -171,7 +174,7 @@ class RigidGroupOptimizer:
                     break
                 if render: 
                     renders.append(dig_outputs['rgb'].detach())
-            return dig_outputs, loss
+            return dig_outputs, loss, whole_pose_adj.data.clone()
         best_loss = float('inf')
         
         def find_pixel(n_gauss = 10000):
@@ -202,14 +205,38 @@ class RigidGroupOptimizer:
             quat = torch.from_numpy(vtf.SO3.from_z_radians(z_rot).wxyz).cuda()
             whole_pose_adj[:,:3] = point - obj_centroid
             whole_pose_adj[:,3:] = quat
-            dig_outputs, loss = try_opt(whole_pose_adj)
+            dig_outputs, loss, final_pose = try_opt(whole_pose_adj)
             if loss is not None and loss < best_loss:
                 best_loss = loss
                 best_outputs = dig_outputs
-                best_pose = whole_pose_adj
+                best_pose = final_pose
         self.reset_transforms()
-        # convert best_pose from world coord delta to obj2cam transform
-        return xs,ys,best_outputs, best_pose, renders,best_pix
+        with torch.no_grad():
+            self.pose_deltas[:,3:]  = best_pose[:,3:]
+            for i in range(len(self.group_masks)):
+                self.pose_deltas[i,:3] = best_pose[:,:3]
+        return xs, ys, best_outputs, renders
+    
+    def get_poses_relative_to_camera(self, c2w: torch.Tensor):
+        """
+        Returns the current group2cam transform as defined by the specified camera pose in world coords
+        c2w: 4x4 tensor of camera to world transform
+        
+        Coordinate origin of the object aligns with world axes and centered at centroid
+
+        returns:
+        Nx4x4 tensor of obj2camera transform for each of the N groups, in the same ordering as the cluster labels
+        """
+        with torch.no_grad():
+            w2c = c2w.inverse().cpu().numpy()
+            obj2cam = torch.zeros(len(self.group_masks),4,4,dtype=torch.float32,device='cuda')
+            for i in range(len(self.group_masks)):
+                gp_centroid = self.init_means[self.group_masks[i]].mean(dim=0)
+                new_centroid = gp_centroid + self.pose_deltas[i,:3]
+                new_quat = self.pose_deltas[i,3:]
+                world2obj = vtf.SE3.from_rotation_and_translation(vtf.SO3(new_quat.cpu().numpy()),new_centroid.cpu().numpy())
+                obj2cam[i,:,:] = torch.tensor(w2c @ world2obj.inverse().as_matrix(),dtype=torch.float32,device='cuda')
+        return obj2cam
 
     def step(self, niter = 1, use_depth = True, use_rgb = False, metric_depth = False):
         scheduler = ExponentialDecayScheduler(ExponentialDecaySchedulerConfig(lr_final = self.pose_lr_final, max_steps=niter)).get_scheduler(self.optimizer, self.pose_lr)
