@@ -1,4 +1,6 @@
 import pyzed.sl as sl
+from typing import Optional, Tuple
+import torch
 import numpy as np
 from raftstereo.raft_stereo import *
 
@@ -8,7 +10,7 @@ class Zed():
         if recording_file is not None:
             init.set_from_svo_file(recording_file)
             #disable depth
-            init.camera_image_flip = sl.FLIP_MODE.ON
+            # init.camera_image_flip = sl.FLIP_MODE.ON
             init.depth_mode=sl.DEPTH_MODE.NONE
             init.camera_resolution = sl.RESOLUTION.HD720
             init.sdk_verbose = 1
@@ -18,7 +20,7 @@ class Zed():
             init.sdk_verbose = 1
             init.camera_fps = 30
             #flip camera
-            init.camera_image_flip = sl.FLIP_MODE.ON
+            # init.camera_image_flip = sl.FLIP_MODE.ON
             init.depth_mode=sl.DEPTH_MODE.NONE
             init.depth_minimum_distance = 100#millimeters
         self.cam = sl.Camera()
@@ -36,7 +38,7 @@ class Zed():
         right_cx = self.get_K(cam='right')[0,2]
         self.cx_diff = (right_cx-left_cx) # /1920
 
-    def get_frame(self,depth=True):
+    def get_frame(self,depth=True) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         res = sl.Resolution()
         res.width = 1280
         res.height = 720
@@ -50,7 +52,7 @@ class Zed():
                 left_torch,right_torch = left.permute(2,0,1),right.permute(2,0,1)
                 flow = raft_inference(left_torch,right_torch,self.model)
                 fx = self.get_K()[0,0] # *1280/1920
-                depth = fx*self.get_stereo_transform()[0,3]/(flow.abs()+self.cx_diff*1280)
+                depth = fx*self.get_stereo_transform()[0,3]/(flow.abs()+self.cx_diff)
             else:
                 depth = None
             return left, right, depth
@@ -95,6 +97,26 @@ if __name__ == "__main__":
     import torch
     from viser import ViserServer
     zed = Zed()
+    out_dir = "zed_out"
+    import os
+    os.makedirs(out_dir,exist_ok=True)
+    i = 0
+    import cv2
+    while True:
+        left, right, depth = zed.get_frame()
+        if left is None:
+            break
+        left,right,depth = left.cpu().numpy(),right.cpu().numpy(),depth.cpu().numpy()
+        cv2.imshow("Left Image", left)
+        key = cv2.waitKey(1)
+        if key == ord('q'):
+            break
+        # save left as jpg with PIL
+        from PIL import Image
+        Image.fromarray(left).save(os.path.join(out_dir,f"left_{i}.jpg"))
+        #save depth
+        np.save(os.path.join(out_dir,f"depth_{i}.npy"),depth)
+        i+=1
 
     # zed.start_record("/home/justin/lerf/motion_vids/mac_charger_fold.svo2")
     # # s = ViserServer()
@@ -137,19 +159,19 @@ if __name__ == "__main__":
         left = left.cpu().numpy()
         depth = depth.cpu().numpy()
         # import matplotlib.pyplot as plt
-        plt.imshow(left)
-        plt.show()
-        # K = zed.get_K()
-        # T_world_camera = np.eye(4)
+        # plt.imshow(left)
+        # plt.show()
+        K = zed.get_K()
+        T_world_camera = np.eye(4)
 
-        # img_wh = left.shape[:2][::-1]
+        img_wh = left.shape[:2][::-1]
 
-        # grid = (
-        #     np.stack(np.meshgrid(np.arange(img_wh[0]), np.arange(img_wh[1])), 2) + 0.5
-        # )
+        grid = (
+            np.stack(np.meshgrid(np.arange(img_wh[0]), np.arange(img_wh[1])), 2) + 0.5
+        )
 
-        # homo_grid = np.concatenate([grid,np.ones((grid.shape[0],grid.shape[1],1))],axis=2).reshape(-1,3)
-        # local_dirs = np.matmul(np.linalg.inv(K),homo_grid.T).T
-        # points = (local_dirs * depth.reshape(-1,1)).astype(np.float32)
-        # points = points.reshape(-1,3)*2
-        # v.add_point_cloud("points", points = points.reshape(-1,3), colors=left.reshape(-1,3),point_size=.001)
+        homo_grid = np.concatenate([grid,np.ones((grid.shape[0],grid.shape[1],1))],axis=2).reshape(-1,3)
+        local_dirs = np.matmul(np.linalg.inv(K),homo_grid.T).T
+        points = (local_dirs * depth.reshape(-1,1)).astype(np.float32)
+        points = points.reshape(-1,3)
+        v.add_point_cloud("points", points = points.reshape(-1,3), colors=left.reshape(-1,3),point_size=.001)

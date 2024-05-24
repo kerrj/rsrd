@@ -22,6 +22,8 @@ from garfield.garfield_gaussian_pipeline import GarfieldGaussianPipeline
 from nerfstudio.utils import writer
 from nerfstudio.models.splatfacto import SH2RGB
 
+from autolab_core import RigidTransform
+
 from toad.yumi_curobo import YumiCurobo
 from toad.zed import Zed
 from toad.optimization.rigid_group_optimizer import RigidGroupOptimizer
@@ -39,8 +41,8 @@ class ZedOptimizer:
     zed: Zed
     optimizer: RigidGroupOptimizer
     viewer: Viewer
-    cam2world: Cameras
     MATCH_RESOLUTION: int = 500
+    init_cam_pose: torch.Tensor  # This is aligned with the actual cam pose provided.
 
     def __init__(
         self,
@@ -73,32 +75,39 @@ class ZedOptimizer:
 
         # Set up the initial camera pose.
         if init_cam_pose is None:
+            print("Init cam pose was none, creating one now.")
             H = np.eye(4)
             H[:3,:3] = vtf.SO3.from_x_radians(np.pi/2).as_matrix()
             init_cam_pose = torch.from_numpy(H).float()[None,:3,:] #TODO ground truth cam to yumi
 
         assert init_cam_pose.shape == (1, 3, 4)
+        print("Init cam pose: ", init_cam_pose)
+        from copy import deepcopy
+        self.init_cam_pose = deepcopy(init_cam_pose)
 
         # convert to opengl format
-        init_cam_pose = torch.cat([
+        init_cam_pose_opengl = torch.cat([
             init_cam_pose[0], torch.tensor([0, 0, 0, 1], dtype=torch.float32).reshape(1, 4)
         ], dim=0) @ (torch.from_numpy(trimesh.transformations.rotation_matrix(np.pi, [1, 0, 0])).float())
-        init_cam_pose = init_cam_pose[None, :3, :]
+        init_cam_pose_opengl = init_cam_pose_opengl[None, :3, :]
         
-        assert init_cam_pose.shape == (1, 3, 4)
+        assert init_cam_pose_opengl.shape == (1, 3, 4)
+        print("Init cam pose opengl: ", init_cam_pose_opengl)
+        dataset_scale = self.pipeline.datamanager.train_dataset._dataparser_outputs.dataparser_scale
+        init_cam_pose_opengl[:, :3, 3] = init_cam_pose_opengl[:, :3, 3] * dataset_scale  # convert to meters
 
         K = self.zed.get_K()
-        self.cam2world = Cameras(camera_to_worlds=init_cam_pose,fx = K[0,0],fy = K[1,1],cx = K[0,2],cy = K[1,2],width=1280,height=720)
-        self.cam2world.rescale_output_resolution(self.MATCH_RESOLUTION/max(self.cam2world.width,self.cam2world.height))
+        cam2world = Cameras(camera_to_worlds=init_cam_pose_opengl,fx = K[0,0],fy = K[1,1],cx = K[0,2],cy = K[1,2],width=1280,height=720)
+        cam2world.rescale_output_resolution(self.MATCH_RESOLUTION/max(cam2world.width,cam2world.height))
 
         # Set up the optimizer.
         self.optimizer = RigidGroupOptimizer(
             self.pipeline.model,
             self.pipeline.datamanager.dino_dataloader,
-            self.cam2world,
+            deepcopy(cam2world),
             self.group_masks,
             group_labels=self.group_labels,
-            dataset_scale=self.pipeline.datamanager.train_dataset._dataparser_outputs.dataparser_scale,
+            dataset_scale=dataset_scale,
             render_lock=self.viewer.train_lock,
         )
 
@@ -131,7 +140,21 @@ class ZedOptimizer:
         points = self.optimizer.dig_model.means.clone().detach()
         colors = SH2RGB(self.optimizer.dig_model.colors.clone().detach())
         points = points / self.optimizer.dataset_scale
-        return trimesh.PointCloud(points.cpu().numpy(), colors=colors.cpu().numpy())
+        pc = trimesh.PointCloud(points.cpu().numpy(), colors=colors.cpu().numpy())  # pointcloud in world frame
+        
+        cam2world = torch.cat([
+            self.init_cam_pose.squeeze(),
+            torch.Tensor([[0, 0, 0, 1]]).to(self.init_cam_pose.device)
+        ], dim=0)
+        pc.vertices = trimesh.transform_points(
+            pc.vertices,
+            cam2world.inverse().cpu().numpy()
+        )  # pointcloud in camera frame.
+        # pc.vertices = trimesh.transform_points(
+        #     pc.vertices,
+        #     trimesh.transformations.rotation_matrix(-np.pi/2, [1, 0, 0])
+        # )  # pointcloud in opencv(?) frame.
+        return pc
 
 
 def main():
@@ -204,37 +227,39 @@ def main():
         print("Zed not available -- won't show camera feed.")
         zed = None
     
+    camera_tf = RigidTransform.load("data/zed_to_world.tf")
     camera_frame = server.add_frame(
         "camera",
-        position=(0.076, 0.04, 0.17),  # rough alignment.
-        wxyz=vtf.SO3.from_rpy_radians(-np.pi/2, 0, -np.pi/2).wxyz,
+        position=camera_tf.translation,  # rough alignment.
+        wxyz=camera_tf.quaternion,
         show_axes=True,
         axes_length=0.1,
         axes_radius=0.005,
     )
-    zed_mesh = trimesh.load("data/ZEDM.stl")
+    zed_mesh = trimesh.load("data/ZED2.stl")
+    assert isinstance(zed_mesh, trimesh.Trimesh)
     server.add_mesh_trimesh(
         "camera/mesh",
         mesh=zed_mesh,
         scale=0.001,
-        position=(0.038, 0, 0),
-        wxyz=vtf.SO3.from_rpy_radians(np.pi/2, 0, np.pi).wxyz,
+        position=(0.06, 0.042, -0.03),
+        wxyz=vtf.SO3.from_rpy_radians(np.pi/2, 0.0, 0.0).wxyz,
     )
 
-    zed_opt = ZedOptimizer(
-        Path("outputs/buddha_balls_poly/dig/2024-05-23_153552/config.yml"),
-        zed,
-        init_cam_pose=torch.from_numpy(vtf.SE3(wxyz_xyz=np.array([*camera_frame.wxyz, *camera_frame.position])).as_matrix()[None,:3,:]).float()
-    )
     opt_init_handle = server.add_gui_button("Set initial frame", disabled=True)
     if zed is not None:
+        zed_opt = ZedOptimizer(
+            Path("outputs/buddha_balls_poly/dig/2024-05-23_153552/config.yml"),
+            zed,
+            init_cam_pose=torch.from_numpy(vtf.SE3(wxyz_xyz=np.array([*camera_frame.wxyz, *camera_frame.position])).as_matrix()[None,:3,:]).float()
+        )
         @opt_init_handle.on_click
         def _(_):
             opt_init_handle.disabled = True
             zed_opt.set_init_frame()
             pointcloud = zed_opt.get_groups_pc()
             server.add_point_cloud(
-                "groups",
+                "camera/groups",
                 points=pointcloud.vertices,
                 colors=pointcloud.colors[:, :3],
                 point_size=0.002

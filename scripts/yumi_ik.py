@@ -4,10 +4,14 @@ Quick interactive demo for yumi IK, with curobo.
 
 import torch
 import viser
+import viser.transforms as vtf
 import time
 import numpy as np
+import trimesh
+from autolab_core import RigidTransform
 
 from toad.yumi_curobo import YumiCurobo
+from toad.zed import Zed
 
 try:
     from yumirws.yumi import YuMi
@@ -53,13 +57,6 @@ def main():
         position=(0.4, -0.2, 0.5),
         wxyz=(0, 1, 0, 0)
     )
-    server.add_grid(
-        name="grid",
-        width=1,
-        height=1,
-        position=(0.5, 0, 0),
-        section_size=0.05,
-    )
 
     # Update the joint positions based on the handle positions.
     # Run IK on the fly!\
@@ -84,8 +81,54 @@ def main():
 
     if YuMi is not None:
         robot_button.disabled = False
+    
+    try:
+        zed = Zed()
+    except:
+        print("Zed not available -- won't show camera feed.")
+        zed = None
+    
+    # get the camera.
+    camera_tf = RigidTransform.load("data/zed_to_world.tf")
+    camera_frame = server.add_frame(
+        "camera",
+        position=camera_tf.translation,  # rough alignment.
+        wxyz=camera_tf.quaternion,
+        show_axes=True,
+        axes_length=0.1,
+        axes_radius=0.005,
+    )
+    zed_mesh = trimesh.load("data/ZED2.stl")
+    assert isinstance(zed_mesh, trimesh.Trimesh)
+    server.add_mesh_trimesh(
+        "camera/mesh",
+        mesh=zed_mesh,
+        scale=0.001,
+        position=(0.06, 0.042, -0.03),
+        wxyz=vtf.SO3.from_rpy_radians(np.pi/2, 0.0, 0.0).wxyz,
+    )
 
     while True:
+        if zed is not None:
+            left, right, depth = zed.get_frame()
+            left = left.cpu().numpy()
+            depth = depth.cpu().numpy()
+
+            K = zed.get_K()
+
+            img_wh = left.shape[:2][::-1]
+
+            grid = (
+                np.stack(np.meshgrid(np.arange(img_wh[0]), np.arange(img_wh[1])), 2) + 0.5
+            )
+
+            homo_grid = np.concatenate([grid,np.ones((grid.shape[0],grid.shape[1],1))],axis=2).reshape(-1,3)
+            local_dirs = np.matmul(np.linalg.inv(K),homo_grid.T).T
+            points = (local_dirs * depth.reshape(-1,1)).astype(np.float32)
+            points = points.reshape(-1,3)
+            
+            server.add_point_cloud("camera/points", points = points.reshape(-1,3), colors=left.reshape(-1,3),point_size=.001)
+
         time.sleep(1)
 
 
