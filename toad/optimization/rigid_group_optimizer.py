@@ -220,7 +220,7 @@ class RigidGroupOptimizer:
     def get_poses_relative_to_camera(self, c2w: torch.Tensor):
         """
         Returns the current group2cam transform as defined by the specified camera pose in world coords
-        c2w: 4x4 tensor of camera to world transform
+        c2w: 3x4 tensor of camera to world transform
         
         Coordinate origin of the object aligns with world axes and centered at centroid
 
@@ -228,6 +228,8 @@ class RigidGroupOptimizer:
         Nx4x4 tensor of obj2camera transform for each of the N groups, in the same ordering as the cluster labels
         """
         with torch.no_grad():
+            assert c2w.shape == (3, 4)
+            c2w = torch.cat([c2w,torch.tensor([0,0,0,1],dtype=torch.float32,device='cuda').view(1,4)],dim=0)
             w2c = c2w.inverse().cpu().numpy()
             obj2cam = torch.zeros(len(self.group_masks),4,4,dtype=torch.float32,device='cuda')
             for i in range(len(self.group_masks)):

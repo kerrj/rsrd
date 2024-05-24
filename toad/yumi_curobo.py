@@ -32,7 +32,7 @@ def createTableWorld():
         "cuboid": {
             "table": {
                 "dims": [1.0, 1.0, 0.2],  # x, y, z
-                "pose": [0.0, 0.0, -0.1, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
+                "pose": [0.0, 0.0, 0.05-0.2, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
             },
         },
     }
@@ -79,9 +79,9 @@ class YumiCurobo:
         # Add ground plane visualization, and remove camera_link.
         target.add_grid(
             name="grid",
-            width=1,
-            height=1,
-            position=(0.5, 0, 0),
+            width=0.6,
+            height=0.8,
+            position=(0.5, 0, 0.05),
             section_size=0.05,
         )
         self._viser_urdf._joint_frames[0].remove()
