@@ -10,6 +10,7 @@ import numpy as np
 import trimesh
 from typing import Optional, List
 import moviepy.editor as mpy
+from copy import deepcopy
 
 from nerfstudio.utils.eval_utils import eval_setup
 from pathlib import Path
@@ -38,25 +39,28 @@ except ImportError:
 
 class ZedOptimizer:
     group_masks: List[torch.Tensor]
-    zed: Zed
     optimizer: RigidGroupOptimizer
     viewer: Viewer
     MATCH_RESOLUTION: int = 500
     init_cam_pose: torch.Tensor  # This is aligned with the actual cam pose provided.
+    graspable_toad: GraspableToadObject
 
     def __init__(
         self,
         config_path: Path,
-        zed: Zed,
+        K: torch.tensor,
+        width: int,
+        height: int,
         init_cam_pose: Optional[torch.Tensor] = None
     ):
         config_path = config_path
-        self.zed = zed
         
         # load the viewer, etc.
         train_config, self.pipeline, _, _ = eval_setup(config_path)
         assert isinstance(self.pipeline, GarfieldGaussianPipeline)
         train_config.logging.local_writer.enable = False
+
+        dataset_scale = self.pipeline.datamanager.train_dataset._dataparser_outputs.dataparser_scale
 
         writer.setup_local_writer(train_config.logging, max_iter=train_config.max_num_iterations)
         self.viewer = Viewer(
@@ -82,8 +86,7 @@ class ZedOptimizer:
 
         assert init_cam_pose.shape == (1, 3, 4)
         print("Init cam pose: ", init_cam_pose)
-        from copy import deepcopy
-        self.init_cam_pose = deepcopy(init_cam_pose)
+        self.init_cam_pose = init_cam_pose
 
         # convert to opengl format
         init_cam_pose_opengl = torch.cat([
@@ -93,23 +96,23 @@ class ZedOptimizer:
         
         assert init_cam_pose_opengl.shape == (1, 3, 4)
         print("Init cam pose opengl: ", init_cam_pose_opengl)
-        dataset_scale = self.pipeline.datamanager.train_dataset._dataparser_outputs.dataparser_scale
         init_cam_pose_opengl[:, :3, 3] = init_cam_pose_opengl[:, :3, 3] * dataset_scale  # convert to meters
+        self.init_cam_pose_opengl = init_cam_pose_opengl
 
-        K = self.zed.get_K()
-        cam2world = Cameras(camera_to_worlds=init_cam_pose_opengl,fx = K[0,0],fy = K[1,1],cx = K[0,2],cy = K[1,2],width=1280,height=720)
+        cam2world = Cameras(camera_to_worlds=init_cam_pose_opengl,fx = K[0,0],fy = K[1,1],cx = K[0,2],cy = K[1,2],width=width,height=height)
         cam2world.rescale_output_resolution(self.MATCH_RESOLUTION/max(cam2world.width,cam2world.height))
 
         # Set up the optimizer.
         self.optimizer = RigidGroupOptimizer(
             self.pipeline.model,
             self.pipeline.datamanager.dino_dataloader,
-            deepcopy(cam2world),
+            cam2world,
             self.group_masks,
             group_labels=self.group_labels,
             dataset_scale=dataset_scale,
             render_lock=self.viewer.train_lock,
         )
+        self.is_inited = False
 
     def _setup_crops_and_groups(self) -> List[torch.Tensor]:
         cluster_labels = None
@@ -121,16 +124,29 @@ class ZedOptimizer:
         group_masks = [(cid == labels).cuda() for cid in range(labels.max() + 1)]
         return labels, group_masks
 
-    def set_init_frame(self) -> None:
-        left_rgb, _, depth = self.zed.get_frame()
-        target_frame_rgb = (left_rgb/255)
+    def set_frame(self, rgb, depth) -> None:
+        target_frame_rgb = (rgb/255)
         self.optimizer.set_frame(target_frame_rgb, depth=depth)
+        
+    def init_obj_pose(self):
         xs, ys, outputs, renders = self.optimizer.initialize_obj_pose(render=True)  # retval only matters for visualization
         if len(renders)>1:
             renders = [r.detach().cpu().numpy()*255 for r in renders]
             #save video as test_camopt.mp4
             out_clip = mpy.ImageSequenceClip(renders, fps=30)  
             out_clip.write_videofile("test_camopt.mp4")
+
+        self.graspable_toad = GraspableToadObject.from_points_and_clusters(
+            self.optimizer.init_means.detach().cpu().numpy(),
+            self.group_labels.detach().cpu().numpy(),
+            scene_scale=self.optimizer.dataset_scale,
+        )
+
+        self.is_inited=True
+
+    def step_opt(self,niter):
+        assert self.is_inited
+        self.optimizer.step(niter=niter,metric_depth=True)
 
     def get_groups_pc(self) -> trimesh.PointCloud:
         # c2w = self.cam2world.camera_to_worlds.squeeze()  # (3, 4)
@@ -155,6 +171,21 @@ class ZedOptimizer:
         #     trimesh.transformations.rotation_matrix(-np.pi/2, [1, 0, 0])
         # )  # pointcloud in opencv(?) frame.
         return pc
+    
+    def get_groups_mesh(self) -> List[trimesh.Trimesh]:
+        meshes = deepcopy(self.graspable_toad.meshes_orig)
+        parts2cam = self.optimizer.get_poses_relative_to_camera(self.init_cam_pose_opengl.squeeze().cuda())
+        for i, mesh in enumerate(meshes):
+            parts2cam[i][:3,3] /= self.optimizer.dataset_scale
+            mesh.vertices -= self.optimizer.init_means[self.optimizer.group_masks[i]].mean(dim=0).detach().cpu().numpy() / self.optimizer.dataset_scale
+            mesh.vertices = trimesh.transform_points(mesh.vertices, parts2cam[i].cpu().numpy())
+
+            # mesh.vertices *= self.optimizer.dataset_scale # put mesh in nerfstudio coords/scale
+            # # mesh.vertices -= self.optimizer.dig_model.means[self.group_labels[[i]]].mean(0).detach().cpu().numpy() # put mesh in "part" frame
+            # mesh.vertices -= ((self.optimizer.init_means[self.optimizer.group_masks[i]].mean(dim=0))).detach().cpu().numpy()
+            # mesh.vertices = trimesh.transform_points(mesh.vertices, parts2cam[i].cpu().numpy()) # put mesh in camera frame
+            # mesh.vertices /= self.optimizer.dataset_scale
+        return meshes
 
 
 def main():
@@ -223,7 +254,8 @@ def main():
 
     try:
         zed = Zed()
-    except:
+    except Exception as e:
+        print(e)
         print("Zed not available -- won't show camera feed.")
         zed = None
     
@@ -248,15 +280,20 @@ def main():
 
     opt_init_handle = server.add_gui_button("Set initial frame", disabled=True)
     if zed is not None:
+        l,_,_=zed.get_frame(depth=False)
         zed_opt = ZedOptimizer(
             Path("outputs/buddha_balls_poly/dig/2024-05-23_153552/config.yml"),
-            zed,
+            zed.get_K(),
+            l.shape[1],
+            l.shape[0],
             init_cam_pose=torch.from_numpy(vtf.SE3(wxyz_xyz=np.array([*camera_frame.wxyz, *camera_frame.position])).as_matrix()[None,:3,:]).float()
         )
         @opt_init_handle.on_click
         def _(_):
             opt_init_handle.disabled = True
-            zed_opt.set_init_frame()
+            l,_,depth = zed.get_frame(depth=True)
+            zed_opt.set_frame(l,depth)
+            zed_opt.init_obj_pose()
             pointcloud = zed_opt.get_groups_pc()
             server.add_point_cloud(
                 "camera/groups",
@@ -264,37 +301,53 @@ def main():
                 colors=pointcloud.colors[:, :3],
                 point_size=0.002
             )
-            import pdb; pdb.set_trace()
-            opt_init_handle.disabled = False
+            # then have the zed_optimizer be allowed to run the optimizer steps.
         opt_init_handle.disabled = False
 
     while True:
         if zed is not None:
             left, right, depth = zed.get_frame()
-            left = left.cpu().numpy()
-            depth = depth.cpu().numpy()
-
-            K = zed.get_K()
+            if zed_opt.is_inited:
+                zed_opt.set_frame(left,depth)
+                zed_opt.step_opt(niter=50)
+                pointcloud = zed_opt.get_groups_pc()
+                server.add_point_cloud(
+                    "camera/groups",
+                    points=pointcloud.vertices,
+                    colors=pointcloud.colors[:, :3],
+                    point_size=0.002
+                )
+                meshes = zed_opt.get_groups_mesh()
+                for i, mesh in enumerate(meshes):
+                    server.add_mesh_trimesh(
+                        f"camera/object/group_{i}",
+                        mesh=mesh,
+                    )
+                
+            K = torch.from_numpy(zed.get_K()).float().cuda()
 
             img_wh = left.shape[:2][::-1]
 
             grid = (
-                np.stack(np.meshgrid(np.arange(img_wh[0]), np.arange(img_wh[1])), 2) + 0.5
+                torch.stack(torch.meshgrid(torch.arange(img_wh[0],device='cuda'), torch.arange(img_wh[1],device='cuda'), indexing='xy'), 2) + 0.5
             )
 
-            homo_grid = np.concatenate([grid,np.ones((grid.shape[0],grid.shape[1],1))],axis=2).reshape(-1,3)
-            local_dirs = np.matmul(np.linalg.inv(K),homo_grid.T).T
-            points = (local_dirs * depth.reshape(-1,1)).astype(np.float32)
+            homo_grid = torch.concatenate([grid,torch.ones((grid.shape[0],grid.shape[1],1),device='cuda')],axis=2).reshape(-1,3)
+            local_dirs = torch.matmul(torch.linalg.inv(K),homo_grid.T).T
+            points = (local_dirs * depth.reshape(-1,1)).float()
             points = points.reshape(-1,3)
             
-            # points_mask = depth.flatten() < 0.8
-            # points = points.reshape(-1, 3)[points_mask][::50]
-            # left = left.reshape(-1, 3)[points_mask][::50]
+            mask = depth.reshape(-1, 1) <= 1.0
+            points = points.reshape(-1, 3)[mask.flatten()][::4].cpu().numpy()
+            left = left.reshape(-1, 3)[mask.flatten()][::4].cpu().numpy()
+
             server.add_point_cloud("camera/points", points = points.reshape(-1,3), colors=left.reshape(-1,3),point_size=.001)
+
 
         # print(camera_frame.position, camera_frame.wxyz)
 
-        time.sleep(1)
+        else:
+            time.sleep(1)
 
 
 if __name__ == "__main__":

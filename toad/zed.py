@@ -12,17 +12,20 @@ class Zed():
             #disable depth
             # init.camera_image_flip = sl.FLIP_MODE.ON
             init.depth_mode=sl.DEPTH_MODE.NONE
-            init.camera_resolution = sl.RESOLUTION.HD720
+            init.camera_resolution = sl.RESOLUTION.HD1080
             init.sdk_verbose = 1
             init.camera_fps = 30
         else:
-            init.camera_resolution = sl.RESOLUTION.HD720
+            init.camera_resolution = sl.RESOLUTION.HD1080
             init.sdk_verbose = 1
             init.camera_fps = 30
             #flip camera
             # init.camera_image_flip = sl.FLIP_MODE.ON
             init.depth_mode=sl.DEPTH_MODE.NONE
             init.depth_minimum_distance = 100#millimeters
+        self.init_res = 1920 if init.camera_resolution == sl.RESOLUTION.HD1080 else 1280
+        self.width = 1280
+        self.height = 720
         self.cam = sl.Camera()
         status = self.cam.open(init)
         if recording_file is not None:
@@ -36,12 +39,13 @@ class Zed():
         self.model = create_raft()
         left_cx = self.get_K(cam='left')[0,2]
         right_cx = self.get_K(cam='right')[0,2]
-        self.cx_diff = (right_cx-left_cx) # /1920
+        self.cx_diff = (right_cx-left_cx)
 
     def get_frame(self,depth=True) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         res = sl.Resolution()
-        res.width = 1280
-        res.height = 720
+        res.width = self.width
+        res.height = self.height
+        r = self.width/self.init_res
         if self.cam.grab() == sl.ERROR_CODE.SUCCESS:
             left_rgb = sl.Mat()
             right_rgb = sl.Mat()
@@ -51,8 +55,8 @@ class Zed():
             if depth:
                 left_torch,right_torch = left.permute(2,0,1),right.permute(2,0,1)
                 flow = raft_inference(left_torch,right_torch,self.model)
-                fx = self.get_K()[0,0] # *1280/1920
-                depth = fx*self.get_stereo_transform()[0,3]/(flow.abs()+self.cx_diff)
+                fx = self.get_K()[0,0]
+                depth = fx*self.get_stereo_transform()[0,3]/(flow.abs()+self.cx_diff*r)
             else:
                 depth = None
             return left, right, depth
@@ -68,7 +72,8 @@ class Zed():
             intrinsics = calib.left_cam
         else:
             intrinsics = calib.right_cam
-        K = np.array([[intrinsics.fx, 0, intrinsics.cx], [0, intrinsics.fy, intrinsics.cy], [0, 0, 1]])
+        r = self.width/self.init_res
+        K = np.array([[intrinsics.fx*r, 0, intrinsics.cx*r], [0, intrinsics.fy*r, intrinsics.cy*r], [0, 0, 1]])
         return K
     
     def get_stereo_transform(self):

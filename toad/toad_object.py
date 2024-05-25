@@ -34,9 +34,9 @@ class ToadObject:
         pcd_object.vertices = pcd_object.vertices - np.mean(pcd_object.vertices, axis=0)
         scene_scale = pcd_object.metadata['_ply_raw']['vertex']['data']['scene_scale'][0]
         
-        vertices = pcd_object.vertices / scene_scale
-        if (vertices.max(axis=0) - vertices.min(axis=0)).max() > 1.0:
-            scene_scale *= 20
+        # vertices = pcd_object.vertices / scene_scale
+        # if (vertices.max(axis=0) - vertices.min(axis=0)).max() > 1.0:
+        #     scene_scale *= 20
 
         cluster_labels = pcd_object.metadata['_ply_raw']['vertex']['data']['cluster_labels'].astype(np.int32)
 
@@ -53,6 +53,31 @@ class ToadObject:
         return ToadObject(
             points=torch.tensor(pcd_object.vertices),
             clusters=torch.tensor(cluster_labels),
+            scene_scale=scene_scale,
+            meshes=part_mesh_list,
+            meshes_orig=part_mesh_orig_list
+        )
+    
+    @staticmethod
+    def from_points_and_clusters(
+        points: np.ndarray,
+        clusters: np.ndarray,
+        scene_scale: float = 1.0
+    ) -> ToadObject:
+        assert points.shape[1] == 3
+        assert len(points) == len(clusters)
+        part_mesh_list, part_mesh_orig_list = [], []
+        points = points / scene_scale
+        for i in range(clusters.max() + 1):
+            mask = clusters == i
+            part_vertices = points[mask]
+            part_mesh, part_mesh_orig = ToadObject._points_to_mesh(part_vertices)
+            part_mesh_list.append(part_mesh)
+            part_mesh_orig_list.append(part_mesh_orig)
+
+        return ToadObject(
+            points=torch.tensor(points),
+            clusters=torch.tensor(clusters),
             scene_scale=scene_scale,
             meshes=part_mesh_list,
             meshes_orig=part_mesh_orig_list
@@ -131,6 +156,29 @@ class GraspableToadObject(ToadObject):
     @staticmethod
     def from_ply(ply_file: str) -> GraspableToadObject:
         toad = ToadObject.from_ply(ply_file)
+        # Compute grasps. :-)
+        mesh_list = toad.meshes
+        grasp_list = []
+        for mesh in mesh_list:
+            grasps = GraspableToadObject._compute_grasps(mesh)
+            grasp_list.append(grasps)
+
+        return GraspableToadObject(
+            points=toad.points,
+            clusters=toad.clusters,
+            meshes=toad.meshes,
+            meshes_orig=toad.meshes_orig,
+            scene_scale=toad.scene_scale,
+            grasps=grasp_list
+        )
+    
+    @staticmethod
+    def from_points_and_clusters(
+        points: np.ndarray,
+        clusters: np.ndarray,
+        scene_scale: float = 1.0
+    ) -> GraspableToadObject:
+        toad = ToadObject.from_points_and_clusters(points, clusters, scene_scale)
         # Compute grasps. :-)
         mesh_list = toad.meshes
         grasp_list = []

@@ -118,7 +118,7 @@ def mnn_matcher(feat_a, feat_b):
 
 class RigidGroupOptimizer:
     use_depth: bool = True
-    depth_ignore_threshold: float = 0.02  # in meters
+    depth_ignore_threshold: float = 0.1  # in meters
     use_atap: bool = True
     pose_lr: float = 0.005
     pose_lr_final: float = 0.0005
@@ -232,7 +232,7 @@ class RigidGroupOptimizer:
                 loss.backward()
                 tape.backward()
                 optimizer.step()
-                if whole_pose_adj.grad.norm() < 2.5e-2:
+                if whole_pose_adj.grad.norm() < 2e-2:
                     break
                 if render:
                     renders.append(dig_outputs["rgb"].detach())
@@ -382,7 +382,7 @@ class RigidGroupOptimizer:
                     pix_loss = pix_loss[
                         valids & (pix_loss < self.depth_ignore_threshold**2)
                     ]
-                    loss = loss + 0.1 * pix_loss.mean()
+                    loss = loss + 10*pix_loss.mean()
                 else:
                     # This is ranking loss for monodepth (which is disparity)
                     disparity = 1.0 / dig_outputs["depth"]

@@ -111,25 +111,28 @@ def main():
     while True:
         if zed is not None:
             left, right, depth = zed.get_frame()
-            left = left.cpu().numpy()
-            depth = depth.cpu().numpy()
 
-            K = zed.get_K()
+            K = torch.from_numpy(zed.get_K()).float().cuda()
 
             img_wh = left.shape[:2][::-1]
 
             grid = (
-                np.stack(np.meshgrid(np.arange(img_wh[0]), np.arange(img_wh[1])), 2) + 0.5
+                torch.stack(torch.meshgrid(torch.arange(img_wh[0],device='cuda'), torch.arange(img_wh[1],device='cuda'), indexing='xy'), 2) + 0.5
             )
 
-            homo_grid = np.concatenate([grid,np.ones((grid.shape[0],grid.shape[1],1))],axis=2).reshape(-1,3)
-            local_dirs = np.matmul(np.linalg.inv(K),homo_grid.T).T
-            points = (local_dirs * depth.reshape(-1,1)).astype(np.float32)
+            homo_grid = torch.concatenate([grid,torch.ones((grid.shape[0],grid.shape[1],1),device='cuda')],axis=2).reshape(-1,3)
+            local_dirs = torch.matmul(torch.linalg.inv(K),homo_grid.T).T
+            points = (local_dirs * depth.reshape(-1,1)).float()
             points = points.reshape(-1,3)
             
+            mask = depth.reshape(-1, 1) <= 1.0
+            points = points.reshape(-1, 3)[mask.flatten()][::4].cpu().numpy()
+            left = left.reshape(-1, 3)[mask.flatten()][::4].cpu().numpy()
+
             server.add_point_cloud("camera/points", points = points.reshape(-1,3), colors=left.reshape(-1,3),point_size=.001)
 
-        time.sleep(1)
+        else:
+            time.sleep(1)
 
 
 if __name__ == "__main__":
