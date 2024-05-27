@@ -221,7 +221,7 @@ class RigidGroupOptimizer:
                         )
                     dig_outputs = self.dig_model.get_outputs(self.init_c2o)
                     if "dino" not in dig_outputs:
-                        return None, None
+                        return None, None,None
                 dino_feats = (
                     self.blur(dig_outputs["dino"].permute(2, 0, 1)[None])
                     .squeeze()
@@ -282,6 +282,16 @@ class RigidGroupOptimizer:
                 best_outputs = dig_outputs
                 best_pose = final_pose
         self.reset_transforms()
+        # Save the initial object to world transform, and initial part to object transforms
+        self.init_o2w = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
+            vtf.SO3.identity(), self.init_means.mean(dim=0).cpu().numpy().squeeze()
+        ).as_matrix()).float().cuda()
+        self.init_p2o = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
+        for i,g in enumerate(self.group_masks):
+            gp_centroid = self.init_means[g].mean(dim=0)
+            self.init_p2o[i,:,:] = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
+                vtf.SO3.identity(), (gp_centroid - self.init_means.mean(dim=0)).cpu().numpy()
+            ).as_matrix()).float().cuda()
         self.apply_to_model(
             best_pose,
             self.dig_model.means.mean(dim=0, keepdim=True).repeat(
@@ -289,6 +299,10 @@ class RigidGroupOptimizer:
             ),
             torch.zeros(self.dig_model.num_points).int().cuda(),
         )
+        # TODO initialize with depth a few steps
+        self.objreg2objinit = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
+            vtf.SO3(best_pose[0,3:].cpu().numpy()), best_pose[0,:3].cpu().numpy().squeeze()
+            ).as_matrix()).float().cuda()
         self._init_centroids()#overwrites the init positions to force the object at the center
         with torch.no_grad():
             self.pose_deltas[:, 3:] = torch.tensor([1, 0, 0, 0], dtype=torch.float32, device="cuda")
@@ -320,12 +334,14 @@ class RigidGroupOptimizer:
                 len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda"
             )
             for i in range(len(self.group_masks)):
-                gp_centroid = self.init_means[self.group_masks[i]].mean(dim=0)
-                new_centroid = gp_centroid + self.pose_deltas[i, :3]
-                new_quat = self.pose_deltas[i, 3:]
-                obj2world_physical = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-                    vtf.SO3(new_quat.cpu().numpy()), new_centroid.cpu().numpy()
-                ).as_matrix()).float().cuda()
+                # gp_centroid = self.init_means[self.group_masks[i]].mean(dim=0)
+                # new_centroid = gp_centroid + self.pose_deltas[i, :3]
+                # new_quat = self.pose_deltas[i, 3:]
+                # obj2world_physical = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
+                #     vtf.SO3(new_quat.cpu().numpy()), new_centroid.cpu().numpy()
+                # ).as_matrix()).float().cuda()
+                #alternatively you can compute it with the saved transforms
+                obj2world_physical = self.init_o2w.matmul(self.objreg2objinit).matmul(self.init_p2o[i])
                 obj2world_physical[:3,3] /= self.dataset_scale
                 obj2cam_physical_batch[i, :, :] = c2w.inverse().matmul(obj2world_physical)
         return obj2cam_physical_batch
