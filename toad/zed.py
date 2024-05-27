@@ -5,6 +5,11 @@ import numpy as np
 from raftstereo.raft_stereo import *
 
 class Zed():
+    width: int
+    """Width of the rgb/depth images."""
+    height: int
+    """Height of the rgb/depth images."""
+
     def __init__(self, recording_file = None, start_time = 0.0):
         init = sl.InitParameters()
         if recording_file is not None:
