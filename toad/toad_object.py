@@ -146,6 +146,10 @@ class ToadObject:
         # flatten the list of lists
         object_sphere_list = [item for sublist in object_sphere_list for item in sublist]
         return object_sphere_list
+    
+    def centroid(self, cluster: int) -> np.ndarray:
+        mask = self.clusters == cluster
+        return self.points[mask].mean(axis=0)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,6 +187,9 @@ class GraspableToadObject(ToadObject):
         mesh_list = toad.meshes
         grasp_list = []
         for mesh in mesh_list:
+            # mesh_scaled = mesh.copy()
+            # mesh_scaled.vertices /= scene_scale
+            # grasps = GraspableToadObject._compute_grasps(mesh_scaled)
             grasps = GraspableToadObject._compute_grasps(mesh)
             grasp_list.append(grasps)
 

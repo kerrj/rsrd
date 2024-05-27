@@ -121,7 +121,7 @@ class RigidGroupOptimizer:
     depth_ignore_threshold: float = 0.1  # in meters
     use_atap: bool = True
     pose_lr: float = 0.005
-    pose_lr_final: float = 0.0005
+    pose_lr_final: float = 0.001
     mask_hands: bool = False
 
     def __init__(
@@ -189,7 +189,7 @@ class RigidGroupOptimizer:
         )
         for i, mask in enumerate(self.group_masks):
             with torch.no_grad():
-                self.centroids[mask] = self.dig_model.gauss_params["means"][mask].mean(
+                self.centroids[mask] = self.init_means[mask].mean(
                     dim=0
                 )
 
@@ -316,23 +316,19 @@ class RigidGroupOptimizer:
                 ],
                 dim=0,
             )
-            w2c = c2w.inverse().cpu().numpy()
-            obj2cam = torch.zeros(
+            obj2cam_physical_batch = torch.empty(
                 len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda"
             )
             for i in range(len(self.group_masks)):
                 gp_centroid = self.init_means[self.group_masks[i]].mean(dim=0)
                 new_centroid = gp_centroid + self.pose_deltas[i, :3]
                 new_quat = self.pose_deltas[i, 3:]
-                world2obj = vtf.SE3.from_rotation_and_translation(
+                obj2world_physical = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
                     vtf.SO3(new_quat.cpu().numpy()), new_centroid.cpu().numpy()
-                )
-                obj2cam[i, :, :] = torch.tensor(
-                    w2c @ world2obj.inverse().as_matrix(),
-                    dtype=torch.float32,
-                    device="cuda",
-                )
-        return obj2cam
+                ).as_matrix()).float().cuda()
+                obj2world_physical[:3,3] /= self.dataset_scale
+                obj2cam_physical_batch[i, :, :] = c2w.inverse().matmul(obj2world_physical)
+        return obj2cam_physical_batch
 
     def step(self, niter=1, use_depth=True, use_rgb=False, metric_depth=False):
         scheduler = ExponentialDecayScheduler(
