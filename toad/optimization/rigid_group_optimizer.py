@@ -177,6 +177,16 @@ class RigidGroupOptimizer:
             self.atap = ATAPLoss(dig_model, group_masks, group_labels)
         self.init_c2o = deepcopy(init_c2o).to("cuda")
         self._init_centroids()
+        # Save the initial object to world transform, and initial part to object transforms
+        self.init_o2w = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
+            vtf.SO3.identity(), self.init_means.mean(dim=0).cpu().numpy().squeeze()
+        ).as_matrix()).float().cuda()
+        self.init_p2o = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
+        for i,g in enumerate(self.group_masks):
+            gp_centroid = self.init_means[g].mean(dim=0)
+            self.init_p2o[i,:,:] = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
+                vtf.SO3.identity(), (gp_centroid - self.init_means.mean(dim=0)).cpu().numpy()
+            ).as_matrix()).float().cuda()
 
     def _init_centroids(self):
         self.init_means = self.dig_model.gauss_params["means"].detach().clone()
@@ -282,16 +292,6 @@ class RigidGroupOptimizer:
                 best_outputs = dig_outputs
                 best_pose = final_pose
         self.reset_transforms()
-        # Save the initial object to world transform, and initial part to object transforms
-        self.init_o2w = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-            vtf.SO3.identity(), self.init_means.mean(dim=0).cpu().numpy().squeeze()
-        ).as_matrix()).float().cuda()
-        self.init_p2o = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
-        for i,g in enumerate(self.group_masks):
-            gp_centroid = self.init_means[g].mean(dim=0)
-            self.init_p2o[i,:,:] = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-                vtf.SO3.identity(), (gp_centroid - self.init_means.mean(dim=0)).cpu().numpy()
-            ).as_matrix()).float().cuda()
         self.apply_to_model(
             best_pose,
             self.dig_model.means.mean(dim=0, keepdim=True).repeat(
@@ -309,7 +309,7 @@ class RigidGroupOptimizer:
             self.pose_deltas[:, :3] = 0
         return xs, ys, best_outputs, renders
 
-    def get_poses_relative_to_camera(self, c2w: torch.Tensor):
+    def get_poses_relative_to_camera(self, c2w: torch.Tensor, keyframe: Optional[int] = None):
         """
         Returns the current group2cam transform as defined by the specified camera pose in world coords
         c2w: 3x4 tensor of camera to world transform
@@ -334,29 +334,33 @@ class RigidGroupOptimizer:
                 len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda"
             )
             for i in range(len(self.group_masks)):
-                obj2world_physical = self.get_part2world_transform(i)
+                obj2world_physical = self.get_part2world_transform(i,keyframe=keyframe)
                 obj2world_physical[:3,3] /= self.dataset_scale
                 obj2cam_physical_batch[i, :, :] = c2w.inverse().matmul(obj2world_physical)
         return obj2cam_physical_batch
     
-    def get_partdelta_transform(self,i):
+    def get_partdelta_transform(self,i,keyframe = None):
         """
-        returns the transform from part_i to parti_i init
+        returns the transform from part_i to parti_i init at keyframe index given
         """
         initial_part2world = self.get_initial_part2world(i)
-        part2world = self.get_part2world_transform(i)
+        part2world = self.get_part2world_transform(i,keyframe=keyframe)
         return initial_part2world.inverse().matmul(part2world)
     
-    def get_part2world_transform(self,i):
+    def get_part2world_transform(self,i,keyframe=None):
         """
-        returns the transform from part_i to world
+        returns the transform from part_i to world at keyframe index given
         """
-        R_delta = torch.from_numpy(vtf.SO3(self.pose_deltas[i, 3:].cpu().numpy()).as_matrix()).float().cuda()
+        if keyframe is not None:
+            p_delta = self.keyframes[keyframe]
+        else:
+            p_delta = self.pose_deltas
+        R_delta = torch.from_numpy(vtf.SO3(p_delta[i, 3:].cpu().numpy()).as_matrix()).float().cuda()
         # we premultiply by rotation matrix to line up the 
         initial_part2world = self.get_initial_part2world(i)
         part2world = initial_part2world.clone()
         part2world[:3,:3] = R_delta[:3,:3].matmul(part2world[:3,:3])# rotate around world frame
-        part2world[:3,3] += self.pose_deltas[i,:3]# translate in world frame
+        part2world[:3,3] += p_delta[i,:3]# translate in world frame
         return part2world
     
     def get_initial_part2world(self,i):
@@ -487,8 +491,24 @@ class RigidGroupOptimizer:
         Applies the ith keyframe to the pose_deltas
         """
         with torch.no_grad():
-            self.apply_to_model(self.keyframes[i])
+            self.apply_to_model(self.keyframes[i], self.centroids, self.group_labels)
+    
+    def save_trajectory(self, path: Path):
+        """
+        Saves the trajectory to a file
+        """
+        torch.save({
+            "keyframes": self.keyframes
+        }, path)
 
+    def load_trajectory(self, path: Path):
+        """
+        Loads the trajectory from a file
+        """
+        data = torch.load(path)
+        self.keyframes = [d.cuda() for d in data["keyframes"]]
+        # Move them all to cuda
+        
     def reset_transforms(self):
         with torch.no_grad():
             self.dig_model.gauss_params["means"] = self.init_means.clone()
