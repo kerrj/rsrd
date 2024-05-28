@@ -334,18 +334,34 @@ class RigidGroupOptimizer:
                 len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda"
             )
             for i in range(len(self.group_masks)):
-                # gp_centroid = self.init_means[self.group_masks[i]].mean(dim=0)
-                # new_centroid = gp_centroid + self.pose_deltas[i, :3]
-                # new_quat = self.pose_deltas[i, 3:]
-                # obj2world_physical = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-                #     vtf.SO3(new_quat.cpu().numpy()), new_centroid.cpu().numpy()
-                # ).as_matrix()).float().cuda()
-                #alternatively you can compute it with the saved transforms
-                obj2world_physical = self.init_o2w.matmul(self.objreg2objinit).matmul(self.init_p2o[i])
+                obj2world_physical = self.get_part2world_transform(i)
                 obj2world_physical[:3,3] /= self.dataset_scale
                 obj2cam_physical_batch[i, :, :] = c2w.inverse().matmul(obj2world_physical)
         return obj2cam_physical_batch
-
+    
+    def get_partdelta_transform(self,i):
+        """
+        returns the transform from part_i to parti_i init
+        """
+        initial_part2world = self.get_initial_part2world(i)
+        part2world = self.get_part2world_transform(i)
+        return initial_part2world.inverse().matmul(part2world)
+    
+    def get_part2world_transform(self,i):
+        """
+        returns the transform from part_i to world
+        """
+        R_delta = torch.from_numpy(vtf.SO3(self.pose_deltas[i, 3:].cpu().numpy()).as_matrix()).float().cuda()
+        # we premultiply by rotation matrix to line up the 
+        initial_part2world = self.get_initial_part2world(i)
+        part2world = initial_part2world.clone()
+        part2world[:3,:3] = R_delta[:3,:3].matmul(part2world[:3,:3])# rotate around world frame
+        part2world[:3,3] += self.pose_deltas[i,:3]# translate in world frame
+        return part2world
+    
+    def get_initial_part2world(self,i):
+        return self.init_o2w.matmul(self.objreg2objinit).matmul(self.init_p2o[i])
+    
     def step(self, niter=1, use_depth=True, use_rgb=False, metric_depth=False):
         scheduler = ExponentialDecayScheduler(
             ExponentialDecaySchedulerConfig(
