@@ -115,11 +115,11 @@ class ToadObject:
         mesh.fill_holes()
 
         mesh_orig = mesh.copy()
-        for _ in range(2):
-            mesh = mesh.subdivide()
-            trimesh.smoothing.filter_mut_dif_laplacian(mesh, lamb=0.2, iterations=10)
+        # for _ in range(2):
+        #     mesh = mesh.subdivide()
+        #     trimesh.smoothing.filter_mut_dif_laplacian(mesh, lamb=0.2, iterations=10)
         
-        print(f"Mesh: {mesh_orig} -> {mesh}")
+        # print(f"Mesh: {mesh_orig} -> {mesh}")
         return mesh, mesh_orig
 
     def to_world_config(self, poses_wxyz_xyz: Optional[List[np.ndarray]] = None) -> List[Mesh]:
@@ -129,7 +129,7 @@ class ToadObject:
         object_mesh_list = [
             Mesh(
                 name=f'object_{i}',
-                vertices=mesh.vertices,
+                vertices=mesh.vertices - self.centroid(i).cpu().numpy(),
                 faces=mesh.faces,
                 pose=[*poses_wxyz_xyz[i][4:], *poses_wxyz_xyz[i][:4]] # xyz, wxyz
             )

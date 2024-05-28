@@ -60,7 +60,7 @@ if __name__ == "__main__":
     urdf = YumiCurobo(
         server,
         world_config=world_config,
-        ik_solver_batch_size=240,
+        # ik_solver_batch_size=240,
         motion_gen_batch_size=240,
     )  # ... can take a while to load...
 

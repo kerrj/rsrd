@@ -20,7 +20,7 @@ from curobo.types.robot import RobotConfig
 from curobo.types.state import JointState
 from curobo.util_file import join_path, load_yaml
 from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig, IKResult
-from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig, MotionGenResult
+from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig, MotionGenResult, PoseCostMetric
 from curobo.geom.types import WorldConfig
 from curobo.geom.sdf.world import CollisionCheckerType, WorldCollision, WorldCollisionConfig
 from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
@@ -32,7 +32,7 @@ def createTableWorld():
         "cuboid": {
             "table": {
                 "dims": [1.0, 1.0, 0.2],  # x, y, z
-                "pose": [0.0, 0.0, 0.05-0.2, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
+                "pose": [0.0, 0.0, 0.00-0.1, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
             },
         },
     }
@@ -81,7 +81,7 @@ class YumiCurobo:
             name="grid",
             width=0.6,
             height=0.8,
-            position=(0.5, 0, 0.05),
+            position=(0.5, 0, 0.00),
             section_size=0.05,
         )
         self._viser_urdf._joint_frames[0].remove()
@@ -135,22 +135,25 @@ class YumiCurobo:
             rotation_threshold=0.05,
             position_threshold=0.005,
             num_ik_seeds=10,
-            num_graph_seeds=4,
             num_trajopt_seeds=4,
             interpolation_dt=0.25,
             trajopt_dt=0.25,
+            # trajopt_tsteps=16,
             collision_activation_distance=0.0,
-            interpolation_steps=100,
+            interpolation_steps=20,
             world_coll_checker=self._robot_world.world_model,
             use_cuda_graph=True,
+            # num_batch_trajopt_seeds=1,
+            # grad_trajopt_iters=50,
+            grad_trajopt_iters=5,
         )
         self._motion_gen = MotionGen(motion_gen_config)
         self._motion_gen_batch_size = motion_gen_batch_size
-        self._motion_gen.warmup(
-            batch=motion_gen_batch_size,
-            warmup_js_trajopt=False,
-            parallel_finetune=False,
-        )
+        # self._motion_gen.warmup(
+        #     batch=motion_gen_batch_size,
+        #     warmup_js_trajopt=False,
+        #     parallel_finetune=False,
+        # )
 
         self._viser_urdf = ViserUrdf(target, Path(urdf_path))
 
@@ -348,17 +351,30 @@ class YumiCurobo:
         goal_l_pose = Pose(goal_l_wxyz_xyz[:, 4:], goal_l_wxyz_xyz[:, :4])
         goal_r_pose = Pose(goal_r_wxyz_xyz[:, 4:], goal_r_wxyz_xyz[:, :4])
 
+        pose_cost_metric = PoseCostMetric.create_grasp_approach_metric(
+                offset_position=0.1, tstep_fraction=0.8
+            )
+
         # get the current joint locations
         result_list = []
         print(start_state.shape, goal_l_pose.shape, goal_r_pose.shape)
         for i in range(0, goal_l_wxyz_xyz.shape[0], self._motion_gen_batch_size):
             result = self._motion_gen.plan_batch(
-                start_state[i:i+self._motion_gen_batch_size],
-                goal_l_pose[i:i+self._motion_gen_batch_size],
-                MotionGenPlanConfig(max_attempts=10, parallel_finetune=True),
+                start_state[i : i + self._motion_gen_batch_size],
+                goal_l_pose[i : i + self._motion_gen_batch_size],
+                MotionGenPlanConfig(
+                    max_attempts=5,
+                    parallel_finetune=True,
+                    enable_finetune_trajopt=False,
+                    enable_graph=True,
+                    pose_cost_metric=pose_cost_metric,  # can only do this w/ warmup
+                    need_graph_success=True,
+                    ik_fail_return=5,
+                    # enable_opt=False,
+                ),
                 link_poses={
-                    "gripper_l_base": goal_l_pose[i:i+self._motion_gen_batch_size],
-                    "gripper_r_base": goal_r_pose[i:i+self._motion_gen_batch_size]
+                    "gripper_l_base": goal_l_pose[i : i + self._motion_gen_batch_size],
+                    "gripper_r_base": goal_r_pose[i : i + self._motion_gen_batch_size],
                 },  # type: ignore
             )
             result_list.append(result)

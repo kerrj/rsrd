@@ -108,7 +108,7 @@ if __name__ == "__main__":
     import torch
     from viser import ViserServer
     zed = Zed()
-    out_dir = "zed_out"
+    out_dir = "box_test"
     import os
     os.makedirs(out_dir,exist_ok=True)
     i = 0

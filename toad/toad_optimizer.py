@@ -38,6 +38,9 @@ class ToadOptimizer:
     viewer_ns: Viewer
     """Viewer for nerfstudio visualization (not the same as robot visualization)."""
 
+    num_groups: int
+    """Number of object parts."""
+
     toad_object: GraspableToadObject
     """Meshes + grasps for object parts."""
 
@@ -76,6 +79,7 @@ class ToadOptimizer:
             train_lock=Lock()
         )
         group_labels, group_masks = self._setup_crops_and_groups()
+        self.num_groups = len(group_masks)
 
         # Initialize camera -- in world coordinates.
         assert init_cam_pose is not None
@@ -148,6 +152,16 @@ class ToadOptimizer:
         Only here is toad_object initialized (since it requires the updated initial means and group labels).
         Also updates `initialized` to `True`."""
         start = time.time()
+        # Initialize the object -- remember that ToadObject works in world scale,
+        # since grasps + etc are in world scale.
+        start = time.time()
+        self.toad_object = GraspableToadObject.from_points_and_clusters(
+            self.optimizer.init_means.detach().cpu().numpy(),
+            self.optimizer.group_labels.detach().cpu().numpy(),
+            scene_scale=self.optimizer.dataset_scale,
+        )
+        print(f"Time taken for init (toad_object): {time.time() - start:.2f} s")
+
         # retval only matters for visualization
         xs, ys, outputs, renders = self.optimizer.initialize_obj_pose(render=True)
         print(f"Time taken for init (pose opt): {time.time() - start:.2f} s")
@@ -159,16 +173,6 @@ class ToadOptimizer:
             out_clip = mpy.ImageSequenceClip(renders, fps=30)  
             out_clip.write_videofile("test_camopt.mp4")
         print(f"Time taken for init (video): {time.time() - start:.2f} s")
-
-        # Initialize the object -- remember that ToadObject works in world scale,
-        # since grasps + etc are in world scale.
-        start = time.time()
-        self.toad_object = GraspableToadObject.from_points_and_clusters(
-            self.optimizer.init_means.detach().cpu().numpy(),
-            self.optimizer.group_labels.detach().cpu().numpy(),
-            scene_scale=self.optimizer.dataset_scale,
-        )
-        print(f"Time taken for init (toad_object): {time.time() - start:.2f} s")
 
         self.initialized = True
 
