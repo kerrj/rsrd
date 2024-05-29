@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Optional
+from typing import List, Optional, Union
 import torch
 import numpy as np
 import trimesh
@@ -9,53 +9,53 @@ import viser.transforms as vtf
 import open3d as o3d
 import dataclasses
 from pathlib import Path
+import tyro
 
-from curobo.geom.types import Mesh, Sphere, WorldConfig
+from curobo.geom.types import Mesh, Sphere
 
 
 @dataclasses.dataclass(frozen=True)
 class ToadObject:
+    """
+    Note that all objects/parts/grasps are stored in *metric* scale, not nerfstudio.
+    """
+
     points: torch.Tensor
     """Gaussian centers of the object. Shape: (N, 3)."""
     clusters: torch.Tensor
     """Cluster labels for each point. Shape: (N,)."""
     meshes: List[trimesh.Trimesh]
-    """List of meshes, one for each cluster, with smoothed geometry."""
-    meshes_orig: List[trimesh.Trimesh]
     """List of meshes, one for each cluster."""
     scene_scale: float
     """Scale of the scene. Used to convert the object to metric scale. Default: 1.0.
     This is defined as: (point in metric) = (point in scene) / scene_scale."""
 
     @staticmethod
-    def from_ply(ply_file: str) -> ToadObject:
+    def from_ply(ply_file: Path) -> ToadObject:
         pcd_object = trimesh.load(ply_file)
         assert type(pcd_object) == trimesh.PointCloud
         pcd_object.vertices = pcd_object.vertices - np.mean(pcd_object.vertices, axis=0)
         scene_scale = pcd_object.metadata['_ply_raw']['vertex']['data']['scene_scale'][0]
-        
-        # vertices = pcd_object.vertices / scene_scale
-        # if (vertices.max(axis=0) - vertices.min(axis=0)).max() > 1.0:
-        #     scene_scale *= 20
 
+        # It's possible that polycam scale is off by a factor of 10...?
+        while (pcd_object.vertices.max(axis=0) - pcd_object.vertices.min(axis=0)).max() / scene_scale > 1:
+            scene_scale *= 10
+
+        # Meshify in nerfstudio/provided scene scale, but store in metric scale.
+        part_mesh_list = []
         cluster_labels = pcd_object.metadata['_ply_raw']['vertex']['data']['cluster_labels'].astype(np.int32)
-
-        part_mesh_list, part_mesh_orig_list = [], []
         for i in range(cluster_labels.max() + 1):
             mask = cluster_labels == i
             part_vertices = np.array(pcd_object.vertices[mask])
-            part_mesh, part_mesh_orig = ToadObject._points_to_mesh(part_vertices)
+            part_mesh = ToadObject._points_to_mesh(part_vertices)
             part_mesh.vertices /= scene_scale
-            part_mesh_orig.vertices /= scene_scale
             part_mesh_list.append(part_mesh)
-            part_mesh_orig_list.append(part_mesh_orig)
 
         return ToadObject(
-            points=torch.tensor(pcd_object.vertices),
+            points=torch.tensor(pcd_object.vertices) / scene_scale,
             clusters=torch.tensor(cluster_labels),
             scene_scale=scene_scale,
             meshes=part_mesh_list,
-            meshes_orig=part_mesh_orig_list
         )
     
     @staticmethod
@@ -66,21 +66,21 @@ class ToadObject:
     ) -> ToadObject:
         assert points.shape[1] == 3
         assert len(points) == len(clusters)
-        part_mesh_list, part_mesh_orig_list = [], []
-        points = points / scene_scale
+
+        # Meshify in nerfstudio/provided scene scale, but store in metric scale.
+        part_mesh_list = []
         for i in range(clusters.max() + 1):
             mask = clusters == i
             part_vertices = points[mask]
-            part_mesh, part_mesh_orig = ToadObject._points_to_mesh(part_vertices)
+            part_mesh = ToadObject._points_to_mesh(part_vertices)
+            part_mesh.vertices /= scene_scale
             part_mesh_list.append(part_mesh)
-            part_mesh_orig_list.append(part_mesh_orig)
 
         return ToadObject(
-            points=torch.tensor(points),
+            points=torch.tensor(points) / scene_scale,
             clusters=torch.tensor(clusters),
             scene_scale=scene_scale,
             meshes=part_mesh_list,
-            meshes_orig=part_mesh_orig_list
         )
 
     @staticmethod
@@ -111,19 +111,20 @@ class ToadObject:
             vertices=np.asarray(mesh.vertices),
             faces=np.asarray(mesh.triangles),
         )
-        mesh.fix_normals()
-        mesh.fill_holes()
         mesh = mesh.simplify_quadric_decimation(100)
 
-        mesh_orig = mesh.copy()
-        # for _ in range(2):
-        #     mesh = mesh.subdivide()
-        #     trimesh.smoothing.filter_mut_dif_laplacian(mesh, lamb=0.2, iterations=10)
-        
-        # print(f"Mesh: {mesh_orig} -> {mesh}")
-        return mesh, mesh_orig
+        # Correct normals are important for grasp sampling!
+        mesh.fix_normals()
+        mesh.fill_holes()
 
-    def to_world_config(self, poses_wxyz_xyz: Optional[List[np.ndarray]] = None) -> List[Mesh]:
+        return mesh
+
+    def to_world_config(self, poses_wxyz_xyz: Optional[List[np.ndarray]] = None, spheres: bool = False) -> Union[List[Mesh], List[Sphere]]:
+        """Turn mesh into curobo's WorldConfig, for collision checking.
+        Args:
+        - poses_wxyz_xyz: List of poses for each part (from part frame), in the format [x, y, z, w, x, y, z].
+        - spheres: If True, return spheres instead of meshes.
+        """
         if poses_wxyz_xyz is None:
             poses_wxyz_xyz = [np.array([1, 0, 0, 0, 0, 0, 0])] * len(self.meshes)
 
@@ -131,26 +132,26 @@ class ToadObject:
             Mesh(
                 name=f'object_{i}',
                 vertices=mesh.vertices - self.centroid(i).cpu().numpy(),
-                faces=mesh.faces,
+                faces=mesh.faces,  # type: ignore
                 pose=[*poses_wxyz_xyz[i][4:], *poses_wxyz_xyz[i][:4]] # xyz, wxyz
             )
-            for i, mesh in enumerate(self.meshes_orig)
+            for i, mesh in enumerate(self.meshes)
         ]
-        return object_mesh_list
 
-    def to_world_config_spheres(self, poses_wxyz_xyz: Optional[List[np.ndarray]] = None) -> List[Sphere]:
-        object_mesh_list = self.to_world_config(poses_wxyz_xyz)
-        object_sphere_list = [
-            mesh.get_bounding_spheres(n_spheres=100)
-            for mesh in object_mesh_list
-        ]
-        # flatten the list of lists
-        object_sphere_list = [item for sublist in object_sphere_list for item in sublist]
-        return object_sphere_list
+        if spheres:
+            object_sphere_list = [
+                mesh.get_bounding_spheres(n_spheres=100)
+                for mesh in object_mesh_list
+            ]
+            # flatten the list of lists
+            object_sphere_list = [item for sublist in object_sphere_list for item in sublist]
+            return object_sphere_list
+        return object_mesh_list
     
-    def centroid(self, cluster: int) -> np.ndarray:
+    def centroid(self, cluster: int) -> torch.Tensor:
+        """Get centroid of a given part. Every frame's part is defined at its centroid."""
         mask = self.clusters == cluster
-        return self.points[mask].mean(axis=0)
+        return self.points[mask].mean(dim=0)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -159,7 +160,7 @@ class GraspableToadObject(ToadObject):
     """List of grasps, of length N_clusters. Each element is a tensor of shape (N_grasps, 7), for grasp center and axis (quat)."""
 
     @staticmethod
-    def from_ply(ply_file: str) -> GraspableToadObject:
+    def from_ply(ply_file: Path) -> GraspableToadObject:
         toad = ToadObject.from_ply(ply_file)
         # Compute grasps. :-)
         mesh_list = toad.meshes
@@ -172,7 +173,6 @@ class GraspableToadObject(ToadObject):
             points=toad.points,
             clusters=toad.clusters,
             meshes=toad.meshes,
-            meshes_orig=toad.meshes_orig,
             scene_scale=toad.scene_scale,
             grasps=grasp_list
         )
@@ -188,9 +188,6 @@ class GraspableToadObject(ToadObject):
         mesh_list = toad.meshes
         grasp_list = []
         for mesh in mesh_list:
-            # mesh_scaled = mesh.copy()
-            # mesh_scaled.vertices /= scene_scale
-            # grasps = GraspableToadObject._compute_grasps(mesh_scaled)
             grasps = GraspableToadObject._compute_grasps(mesh)
             grasp_list.append(grasps)
 
@@ -198,7 +195,6 @@ class GraspableToadObject(ToadObject):
             points=toad.points,
             clusters=toad.clusters,
             meshes=toad.meshes,
-            meshes_orig=toad.meshes_orig,
             scene_scale=toad.scene_scale,
             grasps=grasp_list
         )
@@ -256,7 +252,6 @@ class GraspableToadObject(ToadObject):
 
         # Get grasp pose, in gripper frame.
         grasps = sampler.ranked_actions(state, num_grasps, grippers=[gripper], perturb=True)
-        # print([g.confidence for g in grasps])
 
         # Convert grasp pose to tooltip frame.
         grasp_to_gripper = RigidTransform(
@@ -287,7 +282,7 @@ class GraspableToadObject(ToadObject):
         rotation = trimesh.transformations.rotation_matrix(np.pi/2, [0, 1, 0])
         transform = np.eye(4); transform[:3, :3] = rotation[:3, :3]
         bar = trimesh.creation.cylinder(radius=0.001, height=0.05, transform=transform)
-        bar.visual.vertex_colors = [255, 0, 0, 255]
+        bar.visual.vertex_colors = [255, 0, 0, 255]  # type: ignore[attr-defined]
         return bar
 
     @staticmethod
@@ -319,12 +314,19 @@ class GraspableToadObject(ToadObject):
         return grasps_expanded.multiply(augs_expanded)
 
 
-if __name__ == "__main__":
+def main(
+    ply_path: Path
+):
+    """
+    Visualize the object and its grasps in viser, assuming scene_scale and cluster_labels are saved with garfield.
+
+    Args:
+        ply_path: Path to the ply file of the object, saved from nerfstudio.
+    """
     import viser
     server = viser.ViserServer()
 
-    ply_file = "data/mug.ply"
-    toad = GraspableToadObject.from_ply(ply_file)
+    toad = GraspableToadObject.from_ply(ply_path)
 
     for i, mesh in enumerate(toad.meshes):
         grasps = toad.grasps[i]
@@ -334,8 +336,8 @@ if __name__ == "__main__":
         for j, g in enumerate(grasps):
             server.add_frame(
                 f"object/{i}/grasp/grasp_{j}",
-                position=g[:3],
-                wxyz=g[3:],
+                position=g[:3].cpu().numpy(),
+                wxyz=g[3:].cpu().numpy(),
                 show_axes=False,
             )
             server.add_mesh_trimesh(
@@ -346,3 +348,6 @@ if __name__ == "__main__":
     import time
     while True:
         time.sleep(1000)
+
+if __name__ == "__main__":
+    tyro.cli(main)
