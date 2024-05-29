@@ -134,7 +134,6 @@ class HamerHelper:
         image: Float[np.ndarray, "height width 3"],
         focal_length: float | None,
         rescale_factor: float = 2.0,
-        render_output_dir_for_testing: Path | None = None,
     ):
         """Look for hands.
 
@@ -142,7 +141,6 @@ class HamerHelper:
             image: Image to look for hands in.
             focal_length: Focal length of camera, used for 3D predictions.
             rescale_factor: Rescale factor for running ViT detector. I think 2 is fine, probably.
-            render_output_dir: Directory to render out detections to. Mostly this is used for testing. Doesn't do any rendering
         """
         assert image.shape[-1] == 3
 
@@ -309,45 +307,6 @@ class HamerHelper:
                 hamer_out
             )
 
-            # Render the result.
-            if render_output_dir_for_testing:
-                renderer = Renderer(self.model_cfg, faces=self.model.mano.faces)
-                batch_size = batch["img"].shape[0]
-                for n in range(batch_size):
-                    # Get filename from path img_path
-                    person_id = int(batch["personid"][n])
-                    white_img = (
-                        torch.ones_like(batch["img"][n]).cpu()
-                        - DEFAULT_MEAN[:, None, None] / 255
-                    ) / (DEFAULT_STD[:, None, None] / 255)
-                    input_patch = batch["img"][n].cpu() * (
-                        DEFAULT_STD[:, None, None] / 255
-                    ) + (DEFAULT_MEAN[:, None, None] / 255)
-                    input_patch = input_patch.permute(1, 2, 0).numpy()
-
-                    LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
-                    regression_img,depth = renderer(
-                        out["pred_vertices"][n].detach().cpu().numpy(),
-                        out["pred_cam_t"][n].detach().cpu().numpy(),
-                        batch["img"][n],
-                        mesh_base_color=LIGHT_BLUE,
-                        scene_bg_color=(1, 1, 1),
-                    )
-
-                    final_img = np.concatenate([input_patch, regression_img], axis=1)
-
-                    image_path = (
-                        render_output_dir_for_testing / f"hamer_{person_id}.png"
-                    )
-                    print(f"Writing to {image_path}")
-                    render_output_dir_for_testing.mkdir(exist_ok=True, parents=True)
-                    iio.imwrite(image_path, (255 * final_img).astype(np.uint8))
-
-                    # Add all verts and cams to list
-                    verts = out["pred_vertices"][n].detach().cpu().numpy()
-                    is_right = batch["right"][n].cpu().numpy()
-                    verts[:, 0] = (2 * is_right - 1) * verts[:, 0]
-
         assert len(outputs) > 0
         stacked_outputs = HamerOutputs(
             **{
@@ -436,6 +395,7 @@ class HamerHelper:
         color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
         mask = color[...,-1] > 0
         return color[...,:3],rend_depth, mask
+
 def main(
     input_images: list[Path],
     render_output_dir: Path = Path("./hamer_test_script_outputs"),
@@ -467,9 +427,7 @@ def main(
         # Run HaMeR.
         det_left,det_right = hamer_helper.look_for_hands(
             image=image,
-            focal_length=(1137.0/1280) * image.shape[1],
-            # For most real-world applications, this should probably set to None.
-            render_output_dir_for_testing=None,
+            focal_length=(1137.0/1280) * image.shape[1]
         )
 
         if det_left is not None:
