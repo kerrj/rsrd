@@ -24,8 +24,8 @@ class ToadObject:
     """Gaussian centers of the object. Shape: (N, 3)."""
     clusters: torch.Tensor
     """Cluster labels for each point. Shape: (N,)."""
-    meshes: List[trimesh.Trimesh]
-    """List of meshes, one for each cluster."""
+    _meshes: List[trimesh.Trimesh]
+    """List of meshes, one for each cluster. Each mesh is centered at the centroid / part frame."""
     scene_scale: float
     """Scale of the scene. Used to convert the object to metric scale. Default: 1.0.
     This is defined as: (point in metric) = (point in scene) / scene_scale."""
@@ -47,7 +47,9 @@ class ToadObject:
         for i in range(cluster_labels.max() + 1):
             mask = cluster_labels == i
             part_vertices = np.array(pcd_object.vertices[mask])
+            assert isinstance(part_vertices, np.ndarray)
             part_mesh = ToadObject._points_to_mesh(part_vertices)
+            part_mesh.vertices -= part_vertices.mean(axis=0)  # Center the mesh at the centroid.
             part_mesh.vertices /= scene_scale
             part_mesh_list.append(part_mesh)
 
@@ -55,7 +57,7 @@ class ToadObject:
             points=torch.tensor(pcd_object.vertices) / scene_scale,
             clusters=torch.tensor(cluster_labels),
             scene_scale=scene_scale,
-            meshes=part_mesh_list,
+            _meshes=part_mesh_list,
         )
     
     @staticmethod
@@ -72,7 +74,9 @@ class ToadObject:
         for i in range(clusters.max() + 1):
             mask = clusters == i
             part_vertices = points[mask]
+            assert isinstance(part_vertices, np.ndarray)
             part_mesh = ToadObject._points_to_mesh(part_vertices)
+            part_mesh.vertices -= part_vertices.mean(axis=0)  # Center the mesh at the centroid.
             part_mesh.vertices /= scene_scale
             part_mesh_list.append(part_mesh)
 
@@ -80,7 +84,7 @@ class ToadObject:
             points=torch.tensor(points) / scene_scale,
             clusters=torch.tensor(clusters),
             scene_scale=scene_scale,
-            meshes=part_mesh_list,
+            _meshes=part_mesh_list,
         )
 
     @staticmethod
@@ -92,7 +96,7 @@ class ToadObject:
         toad_obj = ToadObject(
             points=torch.tensor(points),
             clusters=torch.tensor(clusters),
-            meshes=[cylinder_1, cylinder_2],
+            _meshes=[cylinder_1, cylinder_2],
             scene_scale=1.0,
         )
         return toad_obj
@@ -119,6 +123,11 @@ class ToadObject:
 
         return mesh
 
+    @property
+    def meshes(self) -> List[trimesh.Trimesh]:
+        """Deepcopy of meshes, one for each part. Meshes are centered at the part centroid."""
+        return [mesh.copy() for mesh in self._meshes]
+
     def to_world_config(self, poses_wxyz_xyz: Optional[List[np.ndarray]] = None, spheres: bool = False) -> Union[List[Mesh], List[Sphere]]:
         """Turn mesh into curobo's WorldConfig, for collision checking.
         Args:
@@ -126,7 +135,7 @@ class ToadObject:
         - spheres: If True, return spheres instead of meshes.
         """
         if poses_wxyz_xyz is None:
-            poses_wxyz_xyz = [np.array([1, 0, 0, 0, 0, 0, 0])] * len(self.meshes)
+            poses_wxyz_xyz = [np.array([1, 0, 0, 0, 0, 0, 0])] * len(self._meshes)
 
         object_mesh_list = [
             Mesh(
@@ -135,7 +144,7 @@ class ToadObject:
                 faces=mesh.faces,  # type: ignore
                 pose=[*poses_wxyz_xyz[i][4:], *poses_wxyz_xyz[i][:4]] # xyz, wxyz
             )
-            for i, mesh in enumerate(self.meshes)
+            for i, mesh in enumerate(self._meshes)
         ]
 
         if spheres:
@@ -163,7 +172,7 @@ class GraspableToadObject(ToadObject):
     def from_ply(ply_file: Path) -> GraspableToadObject:
         toad = ToadObject.from_ply(ply_file)
         # Compute grasps. :-)
-        mesh_list = toad.meshes
+        mesh_list = toad._meshes
         grasp_list = []
         for mesh in mesh_list:
             grasps = GraspableToadObject._compute_grasps(mesh)
@@ -172,7 +181,7 @@ class GraspableToadObject(ToadObject):
         return GraspableToadObject(
             points=toad.points,
             clusters=toad.clusters,
-            meshes=toad.meshes,
+            _meshes=toad._meshes,
             scene_scale=toad.scene_scale,
             grasps=grasp_list
         )
@@ -185,16 +194,25 @@ class GraspableToadObject(ToadObject):
     ) -> GraspableToadObject:
         toad = ToadObject.from_points_and_clusters(points, clusters, scene_scale)
         # Compute grasps. :-)
-        mesh_list = toad.meshes
+        mesh_list = toad._meshes
         grasp_list = []
         for mesh in mesh_list:
-            grasps = GraspableToadObject._compute_grasps(mesh)
+            grasps = None
+            try:
+                grasps = GraspableToadObject._compute_grasps(mesh)
+            except:
+                pass
+            if grasps is None:
+                # Check if the mesh is inverted...
+                mesh.invert()
+                grasps = GraspableToadObject._compute_grasps(mesh)
+            assert grasps is not None, "No grasps found for the object, is the mesh correct?"
             grasp_list.append(grasps)
 
         return GraspableToadObject(
             points=toad.points,
             clusters=toad.clusters,
-            meshes=toad.meshes,
+            _meshes=toad._meshes,
             scene_scale=toad.scene_scale,
             grasps=grasp_list
         )
@@ -205,7 +223,7 @@ class GraspableToadObject(ToadObject):
             return
 
         # Compute grasps. :-)
-        mesh_list = self.meshes
+        mesh_list = self._meshes
         grasp_list = []
         for mesh in mesh_list:
             grasps = self._compute_grasps(mesh)
@@ -252,6 +270,9 @@ class GraspableToadObject(ToadObject):
 
         # Get grasp pose, in gripper frame.
         grasps = sampler.ranked_actions(state, num_grasps, grippers=[gripper], perturb=True)
+        if len(grasps) == 0:
+            # Redo, but with mesh flipped; normals are probably incorrect.
+            raise ValueError("No grasps found for the object, is the mesh correct?")
 
         # Convert grasp pose to tooltip frame.
         grasp_to_gripper = RigidTransform(
@@ -289,7 +310,8 @@ class GraspableToadObject(ToadObject):
     def to_gripper_frame(
         grasps_tensor: torch.Tensor,
         tooltip_to_gripper: vtf.SE3,
-        num_rotations: int = 24,
+        num_rotations: int = 8,
+        num_translations: int = 3,
     ) -> vtf.SE3:
         """Put grasps in the tooltip frame to the gripper frame, using provided tooltip_to_gripper offset.
         , and also augment grasps by rotating them around the z-axis of the tooltip frame."""
@@ -297,13 +319,22 @@ class GraspableToadObject(ToadObject):
             rotation=vtf.SO3(grasps_tensor[:, 3:].cpu().numpy()),
             translation=grasps_tensor[:, :3].cpu().numpy()
         )
-        augs = (
+        rot_augs = (
             vtf.SE3.from_rotation(
                 rotation=vtf.SO3.from_x_radians(
                     np.linspace(-np.pi, np.pi, num_rotations)
                 ),
             ).multiply(tooltip_to_gripper.inverse())
         )
+        trans_augs = (
+            vtf.SE3.from_translation(
+                translation=np.array([
+                    [d, 0, 0]
+                    for d in np.linspace(-0.01, 0.01, num_translations)
+                ])
+            )
+        )
+        augs = rot_augs.multiply(trans_augs)
 
         len_grasps = grasps.wxyz_xyz.shape[0]
         len_augs = augs.wxyz_xyz.shape[0]
@@ -330,6 +361,14 @@ def main(
 
     for i, mesh in enumerate(toad.meshes):
         grasps = toad.grasps[i]
+        server.add_frame(
+            f"object/{i}",
+            position=toad.centroid(i).cpu().numpy(),
+            wxyz=(1, 0, 0, 0),
+            show_axes=True,
+            axes_length=0.02,
+            axes_radius=.002
+        )
         server.add_mesh_trimesh(
             f"object/{i}/mesh", mesh
         )
