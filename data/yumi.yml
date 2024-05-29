@@ -1,15 +1,7 @@
 robot_cfg:
   kinematics:
-    # usd_path: "FILL_THIS"
-    # usd_robot_root: "/robot"
-    # isaac_usd_path: ""
-    # usd_flip_joints: {}
-    # usd_flip_joint_limits: []
-
-    urdf_path: "dependencies/yumiplanning/yumi_description/urdf/yumi.urdf"
-    asset_root_path: "dependencies/yumiplanning/yumi_description"
-    # urdf_path: "/home/justin/toad/dependencies/yumiplanning/yumi_description/urdf/yumi.urdf"
-    # asset_root_path: "/home/justin/toad/dependencies/yumiplanning/yumi_description"
+    urdf_path: "data/yumi_description/urdf/yumi.urdf"
+    asset_root_path: "data/yumi_description"
     
     base_link: "base_link"
     ee_link: "gripper_l_base"  # "end effector"
