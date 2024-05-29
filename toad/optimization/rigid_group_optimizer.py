@@ -49,7 +49,7 @@ def depth_ranking_loss(rendered_depth, gt_depth):
     Assumes that the layout of the batch comes from a PairPixelSampler, so that adjacent samples in the gt_depth
     and rendered_depth are from pixels with a radius of each other
     """
-    m = 1e-4
+    m = 1e-2
     if rendered_depth.shape[0] % 2 != 0:
         # chop off one index
         rendered_depth = rendered_depth[:-1, :]
@@ -58,8 +58,9 @@ def depth_ranking_loss(rendered_depth, gt_depth):
     out_diff = rendered_depth[::2, :] - rendered_depth[1::2, :] + m
     differing_signs = torch.sign(dpt_diff) != torch.sign(out_diff)
     loss = out_diff[differing_signs] * torch.sign(out_diff[differing_signs])
-    med = loss.quantile(0.8)
-    return loss[loss < med].mean()
+    # med = loss.quantile(0.8)
+    return loss.mean()
+    # return loss[loss < med].mean()
 
 
 @wp.kernel
@@ -123,6 +124,9 @@ class RigidGroupOptimizer:
     pose_lr: float = 0.005
     pose_lr_final: float = 0.001
     mask_hands: bool = False
+
+    init_p2o: torch.Tensor
+    """From: part, To: object. in current world frame. Part frame is centered at part centroid, and object frame is centered at object centroid."""
 
     def __init__(
         self,
@@ -203,10 +207,10 @@ class RigidGroupOptimizer:
                     dim=0
                 )
 
-    def initialize_obj_pose(self, niter=200, n_seeds=6, render=False):
+    def initialize_obj_pose(self, niter=200, n_seeds=6, render=False, metric_depth = True):
         renders = []
 
-        def try_opt(start_pose_adj):
+        def try_opt(start_pose_adj,niter, depth = False):
             "tries to optimize the pose, returns None if failed, otherwise returns outputs and loss"
             self.reset_transforms()
             whole_obj_gp_labels = torch.zeros(self.dig_model.num_points).int().cuda()
@@ -239,6 +243,36 @@ class RigidGroupOptimizer:
                 )
                 pix_loss = self.frame_pca_feats - dino_feats
                 loss = pix_loss.norm(dim=-1).mean()
+                if depth:
+                    object_mask = dig_outputs["accumulation"] > 0.9
+                    if metric_depth:
+                        physical_depth = dig_outputs["depth"] / self.dataset_scale
+                        valids = object_mask & (~self.frame_depth.isnan())
+                        if self.mask_hands:
+                            valids = valids & self.hand_mask.unsqueeze(-1)
+                        pix_loss = (physical_depth - self.frame_depth) ** 2
+                        pix_loss = pix_loss[
+                            valids & (pix_loss < self.depth_ignore_threshold**2)
+                        ]
+                        loss = loss + 10*pix_loss.mean()
+                    else:
+                        # This is ranking loss for monodepth (which is disparity)
+                        disparity = 1.0 / dig_outputs["depth"]
+                        N = 20000
+                        if self.mask_hands:
+                            object_mask = object_mask & self.hand_mask.unsqueeze(-1)
+                        valid_ids = torch.where(object_mask)
+                        rand_samples = torch.randint(
+                            0, valid_ids[0].shape[0], (N,), device="cuda"
+                        )
+                        rand_samples = (
+                            valid_ids[0][rand_samples],
+                            valid_ids[1][rand_samples],
+                        )
+                        rend_samples = disparity[rand_samples]
+                        mono_samples = self.frame_depth[rand_samples]
+                        rank_loss = depth_ranking_loss(rend_samples, mono_samples)
+                        loss = loss + 0.1 * rank_loss
                 loss.backward()
                 tape.backward()
                 optimizer.step()
@@ -286,11 +320,12 @@ class RigidGroupOptimizer:
             quat = torch.from_numpy(vtf.SO3.from_z_radians(z_rot).wxyz).cuda()
             whole_pose_adj[:, :3] = point - obj_centroid
             whole_pose_adj[:, 3:] = quat
-            dig_outputs, loss, final_pose = try_opt(whole_pose_adj)
+            dig_outputs, loss, final_pose = try_opt(whole_pose_adj,niter)
             if loss is not None and loss < best_loss:
                 best_loss = loss
                 best_outputs = dig_outputs
                 best_pose = final_pose
+        _,_,best_pose = try_opt(best_pose,50,depth=True)
         self.reset_transforms()
         self.apply_to_model(
             best_pose,
@@ -334,27 +369,27 @@ class RigidGroupOptimizer:
                 len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda"
             )
             for i in range(len(self.group_masks)):
-                obj2world_physical = self.get_part2world_transform(i,keyframe=keyframe)
+                if keyframe is None:
+                    obj2world_physical = self.get_part2world_transform(i)
+                else:
+                    obj2world_physical = self.get_keyframe_part2world_transform(i, keyframe)
                 obj2world_physical[:3,3] /= self.dataset_scale
                 obj2cam_physical_batch[i, :, :] = c2w.inverse().matmul(obj2world_physical)
         return obj2cam_physical_batch
     
-    def get_partdelta_transform(self,i,keyframe = None):
+    def get_partdelta_transform(self,i):
         """
         returns the transform from part_i to parti_i init at keyframe index given
         """
         initial_part2world = self.get_initial_part2world(i)
-        part2world = self.get_part2world_transform(i,keyframe=keyframe)
+        part2world = self.get_part2world_transform(i)
         return initial_part2world.inverse().matmul(part2world)
     
-    def get_part2world_transform(self,i,keyframe=None):
+    def get_part2world_transform(self,i):
         """
         returns the transform from part_i to world at keyframe index given
         """
-        if keyframe is not None:
-            p_delta = self.keyframes[keyframe]
-        else:
-            p_delta = self.pose_deltas
+        p_delta = self.pose_deltas.detach()
         R_delta = torch.from_numpy(vtf.SO3(p_delta[i, 3:].cpu().numpy()).as_matrix()).float().cuda()
         # we premultiply by rotation matrix to line up the 
         initial_part2world = self.get_initial_part2world(i)
@@ -363,6 +398,13 @@ class RigidGroupOptimizer:
         part2world[:3,3] += p_delta[i,:3]# translate in world frame
         return part2world
     
+    def get_keyframe_part2world_transform(self,i,keyframe):
+        """
+        returns the transform from part_i to world at keyframe index given
+        """
+        part2part = self.keyframes[keyframe]
+        return self.get_initial_part2world(i).matmul(part2part[i])
+
     def get_initial_part2world(self,i):
         return self.init_o2w.matmul(self.objreg2objinit).matmul(self.init_p2o[i])
     
@@ -432,7 +474,7 @@ class RigidGroupOptimizer:
                     rend_samples = disparity[rand_samples]
                     mono_samples = self.frame_depth[rand_samples]
                     rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                    loss = loss + 0.5 * rank_loss
+                    loss = loss + .1*rank_loss
             if use_rgb:
                 loss = loss + 0.05 * (dig_outputs["rgb"] - self.rgb_frame).abs().mean()
             if self.use_atap:
@@ -484,12 +526,16 @@ class RigidGroupOptimizer:
         """
         Saves the current pose_deltas as a keyframe
         """
-        self.keyframes.append(self.pose_deltas.detach().clone())
+        partdeltas = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
+        for i in range(len(self.group_masks)):
+            partdeltas[i] = self.get_partdelta_transform(i)
+        self.keyframes.append(partdeltas)
 
     def apply_keyframe(self, i):
         """
         Applies the ith keyframe to the pose_deltas
         """
+        # TODO Refactor this to use the part2part transforms in keyframes
         with torch.no_grad():
             self.apply_to_model(self.keyframes[i], self.centroids, self.group_labels)
     

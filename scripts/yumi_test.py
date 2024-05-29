@@ -53,34 +53,40 @@ if __name__ == "__main__":
         )
         robot_handler = server.add_gui_button("Move robot", disabled=True)
     if YuMi is not None:
-        robot = YuMi()
-        @gripper_open_button.on_click
-        def _(_):
-            robot.left.open_gripper()
-            robot.right.open_gripper()
-        @gripper_close_button.on_click
-        def _(_):
-            robot.left.close_gripper()
-            robot.right.close_gripper()
-        @robot_handler.on_click
-        def _(_):
-            robot.move_joints_sync(
-                l_joints=urdf.get_left_joints().view(1, 7).cpu().numpy().astype(np.float64),
-                r_joints=urdf.get_right_joints().view(1, 7).cpu().numpy().astype(np.float64),
-                speed=(0.1, np.pi)
-            )
-        gripper_close_button.disabled = False
-        gripper_open_button.disabled = False
-        robot_handler.disabled = False
+        try:
+            robot = YuMi()
+            @gripper_open_button.on_click
+            def _(_):
+                robot.left.open_gripper()
+                robot.right.open_gripper()
+            @gripper_close_button.on_click
+            def _(_):
+                robot.left.close_gripper()
+                robot.right.close_gripper()
+            @robot_handler.on_click
+            def _(_):
+                robot.move_joints_sync(
+                    l_joints=urdf.get_left_joints().view(1, 7).cpu().numpy().astype(np.float64),
+                    r_joints=urdf.get_right_joints().view(1, 7).cpu().numpy().astype(np.float64),
+                    speed=(0.1, np.pi)
+                )
+            gripper_close_button.disabled = False
+            gripper_open_button.disabled = False
+            robot_handler.disabled = False
+        except:
+            print("YuMi not initialized -- won't control the robot.")
+            robot = None
 
     # Needs to be called before any warp pose gets called.
     wp.init()
 
     urdf = YumiCurobo(
         server,
-        ik_solver_batch_size=1,
+        ik_solver_batch_size=240,
         motion_gen_batch_size=240,
     )
+    # for i, mesh in enumerate(urdf.get_robot_as_spheres(urdf.joint_pos)):
+    #     server.add_mesh_trimesh(f'mesh_{i}', mesh)
 
     try:
         zed = Zed()
@@ -116,8 +122,8 @@ if __name__ == "__main__":
     if zed is not None:
         l,_,_=zed.get_frame(depth=False)
         zed_opt = ToadOptimizer(
-            # Path("outputs/buddha_balls_poly/dig/2024-05-23_153552/config.yml"),
-            Path("outputs/calbear/dig/2024-05-24_160735/config.yml"),
+            Path("outputs/buddha_balls_poly/dig/2024-05-23_184345/config.yml"),
+            # Path("outputs/calbear/dig/2024-05-24_160735/config.yml"),
             zed.get_K(),
             l.shape[1],
             l.shape[0],
@@ -132,6 +138,11 @@ if __name__ == "__main__":
             l,_,depth = zed.get_frame(depth=True)
             zed_opt.set_frame(l,depth)
             zed_opt.init_obj_pose()
+            try:
+                zed_opt.optimizer.load_trajectory("renders/buddha_balls_poly/keyframes.pt")
+                keyframe_ind.disabled = False
+            except FileNotFoundError:
+                print("\nCouldn't load trajectory file for rigid group optimizer\n")
             # then have the zed_optimizer be allowed to run the optimizer steps.
 
             # Set up the robot.
@@ -172,6 +183,7 @@ if __name__ == "__main__":
 
     traj, traj_handle, play_handle = None, None, None
     button_handle = server.add_gui_button("Calculate working grasps", disabled=True)
+    keyframe_ind = server.add_gui_slider("Keyframe Index",0.0,1.0,.01,0.0,disabled=True)
 
     @button_handle.on_click
     def _(_):
@@ -216,11 +228,36 @@ if __name__ == "__main__":
         traj = motiongen_list[0].interpolated_plan[motiongen_list[0].success].position
         print(motiongen_list[0].ik_time, motiongen_list[0].trajopt_time, motiongen_list[0].finetune_time)
 
+        if zed_opt.optimizer.keyframes is not None:
+            prev_js = motiongen_list[0].interpolated_plan[:, -1]
+            js_list = []
+            start = time.time()
+            play_zed = False  # genuinely does seem like a problem to have both zed and curobo running at the same time.
+            for i in range(len(zed_opt.optimizer.keyframes)):
+                poses_part2cam = zed_opt.get_parts2cam(keyframe=i)
+                poses_part2world = [vtf.SE3(wxyz_xyz=np.array([*camera_frame.wxyz, *camera_frame.position])).multiply(pose) for pose in poses_part2cam]
+                grasp_cand_list = poses_part2world[part_handle.value].multiply(grasps_gripper)
+                goal_l_wxyz_xyz = torch.Tensor(grasp_cand_list.wxyz_xyz)
+
+                joints_from_ik = urdf.ik(
+                    goal_l_wxyz_xyz=goal_l_wxyz_xyz,
+                    goal_r_wxyz_xyz=goal_r_wxyz_xyz,
+                    initial_js=prev_js.position.squeeze()[:, :14],
+                )[0].js_solution
+                js_list.append(joints_from_ik.position[:, :, :14])
+                prev_js = joints_from_ik
+            # traj = torch.cat([traj.unsqueeze(0), torch.stack(js_list)])
+            print(f"Time taken for keyframes: {time.time() - start:.2f} s")
+            traj = torch.cat([motiongen_list[0].interpolated_plan.position[:, :, :14], *js_list], dim=1)
+            traj = traj[motiongen_list[0].success]
+            play_zed = True
+
         if traj_handle is not None:
             traj_handle.remove()
             play_handle.remove()
         traj_handle = server.add_gui_slider("trajectory", 0, len(traj)-1, 1, 0)
         play_handle = server.add_gui_slider("play", 0, traj.shape[1]-1, 1, 0)
+        move_traj_handle = server.add_gui_button("Play traj")
 
         @traj_handle.on_update
         def _(_):
@@ -232,6 +269,14 @@ if __name__ == "__main__":
             assert traj is not None
             urdf.joint_pos = traj[int(traj_handle.value), int(play_handle.value)]
 
+        @move_traj_handle.on_click
+        def _(_):
+            robot.move_joints_sync(
+                l_joints=traj[int(traj_handle.value)][:, :7].cpu().numpy().astype(np.float64),
+                r_joints=traj[int(traj_handle.value)][:, 7:].cpu().numpy().astype(np.float64),
+                speed=(0.1, np.pi)
+            )
+
 
     while True:
         if zed is not None and play_zed:
@@ -239,8 +284,9 @@ if __name__ == "__main__":
             if zed_opt.initialized:
                 zed_opt.set_frame(left,depth)
                 zed_opt.step_opt(niter=50)
-
-                tf_list = zed_opt.get_parts2cam()
+                keyframe = None if keyframe_ind.disabled else int(keyframe_ind.value*(len(zed_opt.optimizer.keyframes)-1))
+                tf_list = zed_opt.get_parts2cam(keyframe = keyframe)
+                # tf_list = zed_opt.get_parts2cam(keyframe=None)
                 for idx, tf in enumerate(tf_list):
                     server.add_frame(
                         f"camera/object/group_{idx}",

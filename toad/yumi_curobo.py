@@ -119,7 +119,7 @@ class YumiCurobo:
             position_threshold=0.002,
             num_seeds=10,
             self_collision_check=True,
-            self_collision_opt=False,
+            self_collision_opt=True,
             # world_coll_checker=self._robot_world.world_model,
             tensor_args=self._tensor_args,
             use_cuda_graph=True,
@@ -139,21 +139,21 @@ class YumiCurobo:
             interpolation_dt=0.25,
             trajopt_dt=0.25,
             # trajopt_tsteps=16,
-            collision_activation_distance=0.0,
-            interpolation_steps=20,
+            collision_activation_distance=0.01,
+            interpolation_steps=30,
             world_coll_checker=self._robot_world.world_model,
             use_cuda_graph=True,
             # num_batch_trajopt_seeds=1,
             # grad_trajopt_iters=50,
-            grad_trajopt_iters=5,
+            # grad_trajopt_iters=5,
         )
         self._motion_gen = MotionGen(motion_gen_config)
         self._motion_gen_batch_size = motion_gen_batch_size
-        # self._motion_gen.warmup(
-        #     batch=motion_gen_batch_size,
-        #     warmup_js_trajopt=False,
-        #     parallel_finetune=False,
-        # )
+        self._motion_gen.warmup(
+            batch=motion_gen_batch_size,
+            # warmup_js_trajopt=False,
+            # parallel_finetune=False,
+        )
 
         self._viser_urdf = ViserUrdf(target, Path(urdf_path))
 
@@ -188,7 +188,7 @@ class YumiCurobo:
         if joint_pos.shape == (16,):
             gripper_width = joint_pos[-2:]
         else:
-            gripper_width = torch.Tensor([0.02, 0.02]).to(joint_pos.device)
+            gripper_width = torch.Tensor([0.025, 0.025]).to(joint_pos.device)
         _joint_pos = torch.concat(
             (joint_pos[7:14], joint_pos[:7], gripper_width)
         ).detach().cpu().numpy()
@@ -265,6 +265,10 @@ class YumiCurobo:
 
         if initial_js is not None:
             initial_js = initial_js.to(self.device).float()
+        
+        if len(initial_js.shape) == 1:
+            initial_js = initial_js.unsqueeze(0)
+        assert len(initial_js.shape) == 2, f"Should be of size [batch, dof], instead got: {initial_js.shape}"
 
         result_list = []
         for i in range(0, goal_l_wxyz_xyz.shape[0], self._ik_solver_batch_size):
@@ -274,7 +278,7 @@ class YumiCurobo:
                     "gripper_l_base": goal_l[i:i+self._ik_solver_batch_size],
                     "gripper_r_base": goal_r[i:i+self._ik_solver_batch_size]
                 },
-                seed_config=initial_js.expand(1, 1, -1),
+                seed_config=initial_js.unsqueeze(1), # n, batch, dof.
             )
             result_list.append(result)
 
@@ -363,7 +367,7 @@ class YumiCurobo:
                 start_state[i : i + self._motion_gen_batch_size],
                 goal_l_pose[i : i + self._motion_gen_batch_size],
                 MotionGenPlanConfig(
-                    max_attempts=5,
+                    max_attempts=10,
                     parallel_finetune=True,
                     enable_finetune_trajopt=False,
                     enable_graph=True,

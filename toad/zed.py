@@ -108,25 +108,25 @@ if __name__ == "__main__":
     import torch
     from viser import ViserServer
     zed = Zed()
-    out_dir = "box_test"
+    zed.start_record("/home/chungmin/Documents/please2/toad/motion_vids/zed_box.svo2")
     import os
-    os.makedirs(out_dir,exist_ok=True)
+    # os.makedirs(out_dir,exist_ok=True)
     i = 0
     import cv2
     while True:
         left, right, depth = zed.get_frame()
-        if left is None:
-            break
-        left,right,depth = left.cpu().numpy(),right.cpu().numpy(),depth.cpu().numpy()
-        cv2.imshow("Left Image", left)
-        key = cv2.waitKey(1)
-        if key == ord('q'):
-            break
-        # save left as jpg with PIL
-        from PIL import Image
-        Image.fromarray(left).save(os.path.join(out_dir,f"left_{i}.jpg"))
-        #save depth
-        np.save(os.path.join(out_dir,f"depth_{i}.npy"),depth)
+        # if left is None:
+        #     break
+        # left,right,depth = left.cpu().numpy(),right.cpu().numpy(),depth.cpu().numpy()
+        # cv2.imshow("Left Image", left)
+        # key = cv2.waitKey(1)
+        # if key == ord('q'):
+        #     break
+        # # save left as jpg with PIL
+        # from PIL import Image
+        # Image.fromarray(left).save(os.path.join(out_dir,f"left_{i}.jpg"))
+        # #save depth
+        # np.save(os.path.join(out_dir,f"depth_{i}.npy"),depth)
         i+=1
 
     # zed.start_record("/home/justin/lerf/motion_vids/mac_charger_fold.svo2")

@@ -202,10 +202,10 @@ class ToadOptimizer:
         )  # pointcloud in camera frame.
         return pc
 
-    def get_parts2cam(self) -> List[vtf.SE3]:
+    def get_parts2cam(self,keyframe=None) -> List[vtf.SE3]:
         """Get the parts' poses in camera frame. Wrapper for `RigidGroupOptimizer.get_poses_relative_to_camera`."""
         # Note: `get_poses_relative_to_camera` has dataset_scale scaling built in.
-        parts2cam = self.optimizer.get_poses_relative_to_camera(self.init_cam_pose.squeeze().cuda())
+        parts2cam = self.optimizer.get_poses_relative_to_camera(self.init_cam_pose.squeeze().cuda(),keyframe=keyframe)
 
         # Convert to vtf.SE3.
         parts2cam_vtf = [

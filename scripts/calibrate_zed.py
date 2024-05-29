@@ -44,8 +44,8 @@ def find_corners(img,sx,sy,SB=True):
 
 def register_zed():
     N = 6
-    sx = 9
-    sy = 6
+    sx = 6
+    sy = 4
     zed = Zed()
     cb_trans = [.3873,0,.076]
     R = vtf.SO3.from_z_radians(-np.pi/2).as_matrix()
@@ -178,7 +178,7 @@ def register_zed():
     T_camera_world = H_chess_world*T_cb_camera.inverse()
     print("Computed T_camera_world")
     print(T_camera_world)
-    T_camera_world.save("data/zed_to_world.tf")
+    # T_camera_world.save("data/zed_to_world.tf")
 
 if __name__=='__main__':
     register_zed()

@@ -113,6 +113,7 @@ class ToadObject:
         )
         mesh.fix_normals()
         mesh.fill_holes()
+        mesh = mesh.simplify_quadric_decimation(100)
 
         mesh_orig = mesh.copy()
         # for _ in range(2):

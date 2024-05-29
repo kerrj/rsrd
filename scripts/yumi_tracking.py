@@ -130,8 +130,8 @@ def main():
     if zed is not None:
         l,_,_=zed.get_frame(depth=False)
         zed_opt = ToadOptimizer(
-            # Path("outputs/buddha_balls_poly/dig/2024-05-23_153552/config.yml"),
-            Path("outputs/calbear/dig/2024-05-24_160735/config.yml"),
+            Path("outputs/buddha_balls_poly/dig/2024-05-23_153552/config.yml"),
+            # Path("outputs/calbear/dig/2024-05-24_160735/config.yml"),
             zed.get_K(),
             l.shape[1],
             l.shape[0],
