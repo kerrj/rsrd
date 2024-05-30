@@ -115,7 +115,7 @@ class ToadObject:
             vertices=np.asarray(mesh.vertices),
             faces=np.asarray(mesh.triangles),
         )
-        mesh = mesh.simplify_quadric_decimation(100)
+        mesh = mesh.simplify_quadric_decimation(50)
 
         # Correct normals are important for grasp sampling!
         mesh.fix_normals()
@@ -140,11 +140,11 @@ class ToadObject:
         object_mesh_list = [
             Mesh(
                 name=f'object_{i}',
-                vertices=mesh.vertices - self.centroid(i).cpu().numpy(),
+                vertices=mesh.vertices,
                 faces=mesh.faces,  # type: ignore
                 pose=[*poses_wxyz_xyz[i][4:], *poses_wxyz_xyz[i][:4]] # xyz, wxyz
             )
-            for i, mesh in enumerate(self._meshes)
+            for i, mesh in enumerate(self.meshes)  # duplicate it?
         ]
 
         if spheres:
@@ -303,7 +303,7 @@ class GraspableToadObject(ToadObject):
         rotation = trimesh.transformations.rotation_matrix(np.pi/2, [0, 1, 0])
         transform = np.eye(4); transform[:3, :3] = rotation[:3, :3]
         bar = trimesh.creation.cylinder(radius=0.001, height=0.05, transform=transform)
-        bar.visual.vertex_colors = [255, 0, 0, 255]  # type: ignore[attr-defined]
+        bar.visual.vertex_colors = [150, 150, 255, 255]  # type: ignore[attr-defined]
         return bar
 
     @staticmethod
@@ -334,7 +334,9 @@ class GraspableToadObject(ToadObject):
                 ])
             )
         )
-        augs = rot_augs.multiply(trans_augs)
+        augs = vtf.SE3(np.tile(rot_augs.wxyz_xyz, (trans_augs.wxyz_xyz.shape[0], 1))).multiply(
+            vtf.SE3(np.repeat(trans_augs.wxyz_xyz, rot_augs.wxyz_xyz.shape[0], axis=0))
+        )
 
         len_grasps = grasps.wxyz_xyz.shape[0]
         len_augs = augs.wxyz_xyz.shape[0]

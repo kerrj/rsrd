@@ -9,6 +9,7 @@ import time
 import numpy as np
 import trimesh
 from autolab_core import RigidTransform
+import plotly.graph_objects as go
 
 from toad.yumi_curobo import YumiCurobo
 from toad.zed import Zed
@@ -20,17 +21,14 @@ except ImportError:
     print("YuMi not available -- won't control the robot.")
 
 def main():
-    # import multiprocessing as mp
-    # mp.set_start_method("spawn")
     server = viser.ViserServer()
 
     # YuMi robot code must be placed before any curobo code!
-    robot_button = server.add_gui_button(
-        "Move physical robot",
-        disabled=True,
-    )
     if YuMi is not None:
         robot = YuMi()
+        robot_button = server.add_gui_button(
+            "Move physical robot",
+        )
         @robot_button.on_click
         def _(_):
             # robot.left.move_joints_traj(urdf.get_left_joints().view(1, 7).cpu().numpy().astype(np.float64))
@@ -59,7 +57,7 @@ def main():
     )
 
     # Update the joint positions based on the handle positions.
-    # Run IK on the fly!\
+    # Run IK on the fly!
     def update_joints():
         joints_from_ik = urdf.ik(
             torch.Tensor([*drag_l_handle.wxyz, *drag_l_handle.position]).view(1, 7),
@@ -79,57 +77,59 @@ def main():
     # First update to set the initial joint positions.
     update_joints()
 
-    if YuMi is not None:
-        robot_button.disabled = False
-    
     try:
         zed = Zed()
     except:
         print("Zed not available -- won't show camera feed.")
         zed = None
-    
-    # get the camera.
-    camera_tf = RigidTransform.load("data/zed_to_world.tf")
-    camera_frame = server.add_frame(
-        "camera",
-        position=camera_tf.translation,  # rough alignment.
-        wxyz=camera_tf.quaternion,
-        show_axes=True,
-        axes_length=0.1,
-        axes_radius=0.005,
+
+    if zed is not None:
+        # get the camera.
+        camera_tf = RigidTransform.load("data/zed_to_world.tf")
+        server.add_frame(
+            "camera",
+            position=camera_tf.translation,  # rough alignment.
+            wxyz=camera_tf.quaternion,
+            show_axes=True,
+            axes_length=0.1,
+            axes_radius=0.005,
+        )
+        server.add_mesh_trimesh(
+            "camera/mesh",
+            mesh=zed.zed_mesh,
+            scale=0.001,
+            position=zed.cam_to_zed.translation,
+            wxyz=zed.cam_to_zed.quaternion,
+        )
+
+    rgb_vis_handle = server.add_gui_plotly(
+        go.Figure(),
+        aspect=9/16,
     )
-    zed_mesh = trimesh.load("data/ZED2.stl")
-    assert isinstance(zed_mesh, trimesh.Trimesh)
-    server.add_mesh_trimesh(
-        "camera/mesh",
-        mesh=zed_mesh,
-        scale=0.001,
-        position=(0.06, 0.042, -0.03),
-        wxyz=vtf.SO3.from_rpy_radians(np.pi/2, 0.0, 0.0).wxyz,
+    depth_vis_handle = server.add_gui_plotly(
+        go.Figure(),
+        aspect=9/16,
     )
 
     while True:
         if zed is not None:
             left, right, depth = zed.get_frame()
-
             K = torch.from_numpy(zed.get_K()).float().cuda()
+            assert isinstance(left, torch.Tensor) and isinstance(depth, torch.Tensor)
+            points, colors = Zed.project_depth(left, depth, K)
 
-            img_wh = left.shape[:2][::-1]
-
-            grid = (
-                torch.stack(torch.meshgrid(torch.arange(img_wh[0],device='cuda'), torch.arange(img_wh[1],device='cuda'), indexing='xy'), 2) + 0.5
+            server.add_point_cloud(
+                "camera/points",
+                points=points,
+                colors=colors,
+                point_size=0.001,
             )
-
-            homo_grid = torch.concatenate([grid,torch.ones((grid.shape[0],grid.shape[1],1),device='cuda')],axis=2).reshape(-1,3)
-            local_dirs = torch.matmul(torch.linalg.inv(K),homo_grid.T).T
-            points = (local_dirs * depth.reshape(-1,1)).float()
-            points = points.reshape(-1,3)
-            
-            mask = depth.reshape(-1, 1) <= 1.0
-            points = points.reshape(-1, 3)[mask.flatten()][::4].cpu().numpy()
-            left = left.reshape(-1, 3)[mask.flatten()][::4].cpu().numpy()
-
-            server.add_point_cloud("camera/points", points = points.reshape(-1,3), colors=left.reshape(-1,3),point_size=.001)
+            if rgb_vis_handle is not None:
+                fig = zed.plotly_render(left[::4, ::4].cpu().numpy())
+                rgb_vis_handle.figure = fig
+            if depth_vis_handle is not None:
+                fig = zed.plotly_render(depth[::4, ::4].cpu().numpy())
+                depth_vis_handle.figure = fig
 
         else:
             time.sleep(1)

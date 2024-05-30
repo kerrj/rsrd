@@ -104,7 +104,7 @@ class YumiCurobo:
             robot_config=robot_cfg,
             world_model=world_config,
             tensor_args=self._tensor_args,
-            collision_activation_distance=0.0,
+            collision_activation_distance=0.01,
         )
         self._robot_world = RobotWorld(_robot_world_cfg)
         assert isinstance(self._robot_world.world_model, WorldCollision)
@@ -116,12 +116,13 @@ class YumiCurobo:
             robot_cfg,
             None,
             rotation_threshold=0.05,
-            position_threshold=0.002,
+            position_threshold=0.005,
             num_seeds=10,
             self_collision_check=True,
             self_collision_opt=True,
             # world_coll_checker=self._robot_world.world_model,
             tensor_args=self._tensor_args,
+            collision_activation_distance=0.01,
             use_cuda_graph=True,
         )
         self._ik_solver = IKSolver(ik_config)
@@ -138,21 +139,15 @@ class YumiCurobo:
             num_trajopt_seeds=4,
             interpolation_dt=0.25,
             trajopt_dt=0.25,
-            # trajopt_tsteps=16,
             collision_activation_distance=0.01,
             interpolation_steps=30,
             world_coll_checker=self._robot_world.world_model,
             use_cuda_graph=True,
-            # num_batch_trajopt_seeds=1,
-            # grad_trajopt_iters=50,
-            # grad_trajopt_iters=5,
         )
         self._motion_gen = MotionGen(motion_gen_config)
         self._motion_gen_batch_size = motion_gen_batch_size
         self._motion_gen.warmup(
             batch=motion_gen_batch_size,
-            # warmup_js_trajopt=False,
-            # parallel_finetune=False,
         )
 
         self._viser_urdf = ViserUrdf(target, Path(urdf_path))
@@ -249,7 +244,8 @@ class YumiCurobo:
         goal_l_wxyz_xyz: torch.Tensor,
         goal_r_wxyz_xyz: torch.Tensor,
         initial_js: Optional[torch.Tensor] = None,
-    ) -> List[IKResult]:
+        get_pos_only: bool = False,
+    ) -> Union[List[IKResult], Tuple[torch.Tensor, torch.Tensor]]:
         """Solve IK for both arms simultaneously."""
         assert len(goal_l_wxyz_xyz.shape) == 2 and len(goal_r_wxyz_xyz.shape) == 2
         assert goal_l_wxyz_xyz.shape[-1] == 7 and goal_r_wxyz_xyz.shape[-1] == 7
@@ -266,11 +262,13 @@ class YumiCurobo:
         if initial_js is not None:
             initial_js = initial_js.to(self.device).float()
         
-        if len(initial_js.shape) == 1:
-            initial_js = initial_js.unsqueeze(0)
-        assert len(initial_js.shape) == 2, f"Should be of size [batch, dof], instead got: {initial_js.shape}"
+            if len(initial_js.shape) == 1:
+                initial_js = initial_js.unsqueeze(0).expand(goal_l_wxyz_xyz.shape[0], -1)
+            assert len(initial_js.shape) == 2, f"Should be of size [batch, dof], instead got: {initial_js.shape}"
+            assert initial_js.shape[0] == goal_l_wxyz_xyz.shape[0]
+            initial_js = initial_js.unsqueeze(1) # n, batch, dof.
 
-        result_list = []
+        result_list: List[IKResult] = []
         for i in range(0, goal_l_wxyz_xyz.shape[0], self._ik_solver_batch_size):
             result = self._ik_solver.solve_batch(
                 goal_l[i:i+self._ik_solver_batch_size],
@@ -278,9 +276,22 @@ class YumiCurobo:
                     "gripper_l_base": goal_l[i:i+self._ik_solver_batch_size],
                     "gripper_r_base": goal_r[i:i+self._ik_solver_batch_size]
                 },
-                seed_config=initial_js.unsqueeze(1), # n, batch, dof.
+                seed_config=initial_js[i:i+self._ik_solver_batch_size]  # None, or [n, batch, dof].
             )
             result_list.append(result)
+
+        if get_pos_only:
+            positions = torch.cat([
+                result.js_solution.position for result in result_list  # type: ignore
+            ], dim=0)  # [batch, time, dof]
+            success = torch.cat([
+                result.success for result in result_list  # type: ignore
+            ], dim=0)
+
+            # Pad success shape, to be [batch, 1].
+            if len(success.shape) == 1:
+                success = success.unsqueeze(-1)
+            return positions, success
 
         return result_list
 
@@ -314,15 +325,29 @@ class YumiCurobo:
             return None
 
         return torch.cat(traj_all)
+    
+    def collides(
+        self,
+        joint_pos: torch.Tensor,
+        world_threshold: float = 0.0,
+    ) -> torch.Tensor:
+        original_joint_pos_shape = joint_pos.shape
+        joint_pos = joint_pos.view(-1, 14)
+        d_world, d_self = self._robot_world.get_world_self_collision_distance_from_joint_trajectory(
+            joint_pos.unsqueeze(1)
+        )
+        collides = (d_world.squeeze() > world_threshold) | (d_self.squeeze() > 0)
+        return collides.view(original_joint_pos_shape[:-1])
 
     def motiongen(
         self,
         goal_l_wxyz_xyz: torch.Tensor,
         goal_r_wxyz_xyz: torch.Tensor,
-        start_state: Optional[JointState] = None,
+        start_state: Optional[Union[JointState, torch.Tensor]] = None,
         start_l_wxyz_xyz: Optional[torch.Tensor] = None,
         start_r_wxyz_xyz: Optional[torch.Tensor] = None,
-    ) -> List[MotionGenResult]:
+        get_pos_only: bool = False,
+    ) -> Union[List[MotionGenResult], Tuple[torch.Tensor, torch.Tensor]]:
         # Takes around ~0.1 seconds
         assert len(goal_l_wxyz_xyz.shape) == 2 and len(goal_r_wxyz_xyz.shape) == 2
         assert goal_l_wxyz_xyz.shape[0] % self._motion_gen_batch_size == 0
@@ -339,7 +364,10 @@ class YumiCurobo:
                 raise ValueError("Either start_state or start_l_wxyz_xyz and start_r_wxyz_xyz must be provided.")
 
         # Make sure that start_state is a batched tensor (bxdof), without gripper.
-        start_joints = start_state.position
+        if isinstance(start_state, JointState):
+            start_joints = start_state.position
+        elif isinstance(start_state, torch.Tensor):
+            start_joints = start_state
         assert isinstance(start_joints, torch.Tensor)
         if len(start_joints.shape) == 1:
             start_joints = start_joints.expand(goal_l_wxyz_xyz.shape[0], -1)
@@ -360,21 +388,19 @@ class YumiCurobo:
             )
 
         # get the current joint locations
-        result_list = []
-        print(start_state.shape, goal_l_pose.shape, goal_r_pose.shape)
+        result_list: List[MotionGenResult] = []
         for i in range(0, goal_l_wxyz_xyz.shape[0], self._motion_gen_batch_size):
             result = self._motion_gen.plan_batch(
                 start_state[i : i + self._motion_gen_batch_size],
                 goal_l_pose[i : i + self._motion_gen_batch_size],
                 MotionGenPlanConfig(
-                    max_attempts=10,
+                    max_attempts=60,
                     parallel_finetune=True,
-                    enable_finetune_trajopt=False,
+                    # enable_finetune_trajopt=False,
                     enable_graph=True,
                     pose_cost_metric=pose_cost_metric,  # can only do this w/ warmup
                     need_graph_success=True,
                     ik_fail_return=5,
-                    # enable_opt=False,
                 ),
                 link_poses={
                     "gripper_l_base": goal_l_pose[i : i + self._motion_gen_batch_size],
@@ -382,6 +408,22 @@ class YumiCurobo:
                 },  # type: ignore
             )
             result_list.append(result)
+
+        if get_pos_only:
+            positions = torch.cat([
+                result.interpolated_plan.position for result in result_list  # type: ignore
+            ], dim=0)  # [batch, time, dof]
+            success = torch.cat([
+                result.success for result in result_list  # type: ignore
+            ], dim=0)
+
+            # Pad success shape, to be [batch, time].
+            if len(success.shape) == 1:
+                success = success.unsqueeze(-1).expand(-1, positions.shape[1])
+            assert positions.shape[0] == success.shape[0]
+            assert positions.shape[1] == success.shape[1]
+
+            return positions, success
 
         return result_list
 

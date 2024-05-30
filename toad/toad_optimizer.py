@@ -4,7 +4,7 @@ import viser.transforms as vtf
 import time
 import numpy as np
 import trimesh
-from typing import Optional, List
+from typing import Optional, List, Tuple
 import moviepy.editor as mpy
 from copy import deepcopy
 
@@ -19,10 +19,6 @@ from garfield.garfield_gaussian_pipeline import GarfieldGaussianPipeline
 from nerfstudio.utils import writer
 from nerfstudio.models.splatfacto import SH2RGB
 
-from autolab_core import RigidTransform
-
-from toad.yumi_curobo import YumiCurobo
-from toad.zed import Zed
 from toad.optimization.rigid_group_optimizer import RigidGroupOptimizer
 from toad.toad_object import GraspableToadObject
 
@@ -55,7 +51,7 @@ class ToadOptimizer:
     def __init__(
         self,
         config_path: Path,  # path to the nerfstudio config file
-        K: torch.Tensor,  # camera intrinsics
+        K: np.ndarray,  # camera intrinsics
         width: int,  # camera width
         height: int,  # camera height
         init_cam_pose: torch.Tensor,  # initial camera pose in OpenCV format
@@ -65,6 +61,7 @@ class ToadOptimizer:
         assert isinstance(self.pipeline, GarfieldGaussianPipeline)
         train_config.logging.local_writer.enable = False
 
+        assert self.pipeline.datamanager.train_dataset is not None
         dataset_scale = self.pipeline.datamanager.train_dataset._dataparser_outputs.dataparser_scale
 
         writer.setup_local_writer(train_config.logging, max_iter=train_config.max_num_iterations)
@@ -78,6 +75,7 @@ class ToadOptimizer:
             self.pipeline,
             train_lock=Lock()
         )
+        assert self.viewer_ns.train_lock is not None
         group_labels, group_masks = self._setup_crops_and_groups()
         self.num_groups = len(group_masks)
 
@@ -108,7 +106,7 @@ class ToadOptimizer:
             height=height,
         )
         cam2world_ns.rescale_output_resolution(
-            self.MATCH_RESOLUTION / max(cam2world_ns.width, cam2world_ns.height)
+            self.MATCH_RESOLUTION / max(width, height)
         )
 
         # Set up the optimizer.
@@ -124,7 +122,7 @@ class ToadOptimizer:
 
         self.initialized = False
 
-    def _setup_crops_and_groups(self) -> List[torch.Tensor]:
+    def _setup_crops_and_groups(self) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """Set up the crops and groups for the optimizer, interactively."""
         cluster_labels = None
 
@@ -215,18 +213,3 @@ class ToadOptimizer:
             ) for pose in parts2cam
         ]
         return parts2cam_vtf
-
-    def get_mesh_centered(self, idx: int) -> trimesh.Trimesh:
-        """Get the mesh of the object part idx, centered at the part's centroid.
-        This is different than `ToadObject.meshes`, which lie in the original ns world coordinates."""
-        mesh = deepcopy(self.toad_object.meshes_orig[idx])
-        mesh.vertices -= self.toad_object.centroid(idx).cpu().numpy()
-        return mesh
-
-    def get_grasps_centered(self, idx: int) -> torch.Tensor:
-        """Get the grasps of the object part, centered at the part's centroid.
-        This is different than `ToadObject.grasps`, which lie in the original ns world coordinates.
-        Is in the format [N_grasps, 7] (xyz_wxyz)."""
-        grasps_xyz_wxyz = deepcopy(self.toad_object.grasps[idx])
-        grasps_xyz_wxyz[:,:3] -= self.toad_object.centroid(idx).cpu().numpy()
-        return grasps_xyz_wxyz
