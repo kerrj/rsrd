@@ -435,10 +435,11 @@ def main(
         if det_right is not None:
             rgb, depth,mask = hamer_helper.render_detection(det_right,0,1280,720,1137.0)
         import matplotlib.pyplot as plt
-        fig,axs = plt.subplots(1,3)
-        axs[0].imshow(rgb)
-        axs[1].imshow(depth)
-        axs[2].imshow(mask)
+        fig,axs = plt.subplots(1,4)
+        axs[0].imshow(image)
+        axs[1].imshow(rgb)
+        axs[2].imshow(depth)
+        axs[3].imshow(mask)
         plt.show()
 
 
