@@ -337,7 +337,6 @@ class RigidGroupOptimizer:
             ),
             torch.zeros(self.dig_model.num_points).int().cuda(),
         )
-        # TODO initialize with depth a few steps
         self.objreg2objinit = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
             vtf.SO3(best_pose[0,3:].cpu().numpy()), best_pose[0,:3].cpu().numpy().squeeze()
             ).as_matrix()).float().cuda()
@@ -539,7 +538,7 @@ class RigidGroupOptimizer:
             all_hands = [hand.apply_transform(w2o) for hand in all_hands]
             self.hand_frames.append(all_hands)
         else:
-            self.hand_frames.append(([],[]))
+            self.hand_frames.append([])
 
         partdeltas = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
         for i in range(len(self.group_masks)):
@@ -550,9 +549,17 @@ class RigidGroupOptimizer:
         """
         Applies the ith keyframe to the pose_deltas
         """
-        # TODO Refactor this to use the part2part transforms in keyframes
+        # all this scary math is to convert the partdelta transforms to the pose_delta format for applying to 
+        # the model
+        deltas_to_apply = torch.empty(len(self.group_masks), 7, dtype=torch.float32, device="cuda")
+        for j in range(len(self.group_masks)):
+            part2world = self.get_keyframe_part2world_transform(j,i)
+            initpart2world = self.get_keyframe_part2world_transform(j,0)
+            rotdelta = part2world[:3,:3].matmul(initpart2world[:3,:3].inverse())
+            deltas_to_apply[j,:3] = part2world[:3,3] - initpart2world[:3,3]
+            deltas_to_apply[j,3:] = torch.from_numpy(vtf.SO3.from_matrix(rotdelta[:3,:3].cpu().numpy()).wxyz).cuda()
         with torch.no_grad():
-            self.apply_to_model(self.keyframes[i], self.centroids, self.group_labels)
+            self.apply_to_model(deltas_to_apply, self.centroids, self.group_labels)
     
     def save_trajectory(self, path: Path):
         """
@@ -569,7 +576,7 @@ class RigidGroupOptimizer:
         """
         data = torch.load(path)
         self.keyframes = [d.cuda() for d in data["keyframes"]]
-        # self.hand_frames = data['hand_frames']
+        self.hand_frames = data['hand_frames']
         
     def reset_transforms(self):
         with torch.no_grad():
