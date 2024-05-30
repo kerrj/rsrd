@@ -114,14 +114,14 @@ if __name__ == "__main__":
     i = 0
     import cv2
     while True:
-        left, right, depth = zed.get_frame()
+        left, right, depth = zed.get_frame(depth=False)
         # if left is None:
         #     break
-        # left,right,depth = left.cpu().numpy(),right.cpu().numpy(),depth.cpu().numpy()
-        # cv2.imshow("Left Image", left)
-        # key = cv2.waitKey(1)
-        # if key == ord('q'):
-        #     break
+        left,right,depth = left.cpu().numpy(),right.cpu().numpy(),depth.cpu().numpy()
+        cv2.imshow("Left Image", left)
+        key = cv2.waitKey(1)
+        if key == ord('q'):
+            break
         # # save left as jpg with PIL
         # from PIL import Image
         # Image.fromarray(left).save(os.path.join(out_dir,f"left_{i}.jpg"))

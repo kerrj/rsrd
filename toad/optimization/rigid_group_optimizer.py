@@ -27,6 +27,7 @@ import warp as wp
 from toad.optimization.atap_loss import ATAPLoss
 from toad.utils import *
 import viser.transforms as vtf
+import trimesh
 
 
 def quatmul(q0: torch.Tensor, q1: torch.Tensor):
@@ -175,6 +176,8 @@ class RigidGroupOptimizer:
         self.optimizer = torch.optim.Adam([self.pose_deltas], lr=self.pose_lr)
         # self.weights_optimizer = torch.optim.Adam([self.connectivity_weights],lr=.001)
         self.keyframes = []
+        #hand_frames stores a list of hand vertices and faces for each keyframe, stored in the OBJECT COORDINATE FRAME
+        self.hand_frames = []
         # lock to prevent blocking the render thread if provided
         self.render_lock = render_lock
         if self.use_atap:
@@ -404,9 +407,12 @@ class RigidGroupOptimizer:
         """
         part2part = self.keyframes[keyframe]
         return self.get_initial_part2world(i).matmul(part2part[i])
+    
+    def get_registered_o2w(self):
+        return self.init_o2w.matmul(self.objreg2objinit)
 
     def get_initial_part2world(self,i):
-        return self.init_o2w.matmul(self.objreg2objinit).matmul(self.init_p2o[i])
+        return self.get_registered_o2w().matmul(self.init_p2o[i])
     
     def step(self, niter=1, use_depth=True, use_rgb=False, metric_depth=False):
         scheduler = ExponentialDecayScheduler(
@@ -522,10 +528,19 @@ class RigidGroupOptimizer:
         self.dig_model.gauss_params["quats"] = new_quats
         self.dig_model.gauss_params["means"] = new_means
 
-    def register_keyframe(self):
+    def register_keyframe(self, lhands: List[trimesh.Trimesh], rhands: List[trimesh.Trimesh]):
         """
         Saves the current pose_deltas as a keyframe
         """
+        # hand vertices are given in world coordinates
+        w2o = self.get_registered_o2w().inverse().cpu().numpy()
+        all_hands = lhands + rhands
+        if len(all_hands)>0:
+            all_hands = [hand.apply_transform(w2o) for hand in all_hands]
+            self.hand_frames.append(all_hands)
+        else:
+            self.hand_frames.append(([],[]))
+
         partdeltas = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
         for i in range(len(self.group_masks)):
             partdeltas[i] = self.get_partdelta_transform(i)
@@ -544,7 +559,8 @@ class RigidGroupOptimizer:
         Saves the trajectory to a file
         """
         torch.save({
-            "keyframes": self.keyframes
+            "keyframes": self.keyframes,
+            "hand_frames": self.hand_frames
         }, path)
 
     def load_trajectory(self, path: Path):
@@ -553,7 +569,7 @@ class RigidGroupOptimizer:
         """
         data = torch.load(path)
         self.keyframes = [d.cuda() for d in data["keyframes"]]
-        # Move them all to cuda
+        self.hand_frames = data['hand_frames']
         
     def reset_transforms(self):
         with torch.no_grad():

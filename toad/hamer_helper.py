@@ -11,7 +11,12 @@ import torch
 import tyro
 from jaxtyping import Float
 from torch import Tensor
-
+from hamer.datasets.vitdet_dataset import (
+    DEFAULT_MEAN,
+    DEFAULT_STD,
+    ViTDetDataset,
+)
+from hamer.utils.renderer import Renderer, cam_crop_to_full
 
 @contextlib.contextmanager
 def stopwatch(message: str):
@@ -129,15 +134,13 @@ class HamerHelper:
         image: Float[np.ndarray, "height width 3"],
         focal_length: float | None,
         rescale_factor: float = 2.0,
-        render_output_dir_for_testing: Path | None = None,
-    ) -> HamerOutputs | None:
+    ):
         """Look for hands.
 
         Arguments:
             image: Image to look for hands in.
             focal_length: Focal length of camera, used for 3D predictions.
             rescale_factor: Rescale factor for running ViT detector. I think 2 is fine, probably.
-            render_output_dir: Directory to render out detections to. Mostly this is used for testing. Doesn't do any rendering
         """
         assert image.shape[-1] == 3
 
@@ -232,17 +235,12 @@ class HamerHelper:
                 is_right.append(1)
 
         if len(bboxes) == 0:
-            return None
+            return None,None
 
         boxes = np.stack(bboxes)
         right = np.stack(is_right)
 
-        # Run reconstruction on all detected hands
-        from hamer.datasets.vitdet_dataset import (
-            DEFAULT_MEAN,
-            DEFAULT_STD,
-            ViTDetDataset,
-        )
+        
 
         dataset = ViTDetDataset(
             self.model_cfg,
@@ -266,23 +264,6 @@ class HamerHelper:
             with torch.no_grad():
                 out = self.model.forward(batch)
 
-            # for k, v in out.items():
-            #     if isinstance(v, dict):
-            #         for kk, vv in v.items():
-            #             print(k, kk, vv.shape)
-            #     else:
-            #         print(k, v.shape)
-            # Example Hamer outputs:
-            # pred_cam torch.Size([1, 3])
-            # pred_mano_params global_orient torch.Size([1, 1, 3, 3])
-            # pred_mano_params hand_pose torch.Size([1, 15, 3, 3])
-            # pred_mano_params betas torch.Size([1, 10])
-            # pred_cam_t torch.Size([1, 3])
-            # focal_length torch.Size([1, 2])
-            # pred_keypoints_3d torch.Size([1, 21, 3])
-            # pred_vertices torch.Size([1, 778, 3])
-            # pred_keypoints_2d torch.Size([1, 21, 2])
-
             multiplier = 2 * batch["right"] - 1
             pred_cam = out["pred_cam"]
             pred_cam[:, 1] = multiplier * pred_cam[:, 1]
@@ -300,14 +281,11 @@ class HamerHelper:
             else:
                 scaled_focal_length = focal_length
 
-            from hamer.utils.renderer import Renderer, cam_crop_to_full
 
             pred_cam_t_full = cam_crop_to_full(
                 pred_cam, box_center, box_size, img_size, scaled_focal_length
             )
-
-            outputs.append(
-                HamerOutputs(
+            hamer_out = HamerOutputs(
                     mano_faces_left=torch.from_numpy(
                         self.model.mano.faces[:, [0, 2, 1]].astype(np.int64)
                     ).to(device=self.device),
@@ -324,46 +302,10 @@ class HamerHelper:
                     pred_keypoints_2d=out["pred_keypoints_2d"],
                     pred_right=batch["right"],
                 )
+            
+            outputs.append(
+                hamer_out
             )
-
-            # Render the result.
-            if render_output_dir_for_testing:
-                renderer = Renderer(self.model_cfg, faces=self.model.mano.faces)
-                batch_size = batch["img"].shape[0]
-                for n in range(batch_size):
-                    # Get filename from path img_path
-                    person_id = int(batch["personid"][n])
-                    white_img = (
-                        torch.ones_like(batch["img"][n]).cpu()
-                        - DEFAULT_MEAN[:, None, None] / 255
-                    ) / (DEFAULT_STD[:, None, None] / 255)
-                    input_patch = batch["img"][n].cpu() * (
-                        DEFAULT_STD[:, None, None] / 255
-                    ) + (DEFAULT_MEAN[:, None, None] / 255)
-                    input_patch = input_patch.permute(1, 2, 0).numpy()
-
-                    LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
-                    regression_img = renderer(
-                        out["pred_vertices"][n].detach().cpu().numpy(),
-                        out["pred_cam_t"][n].detach().cpu().numpy(),
-                        batch["img"][n],
-                        mesh_base_color=LIGHT_BLUE,
-                        scene_bg_color=(1, 1, 1),
-                    )
-
-                    final_img = np.concatenate([input_patch, regression_img], axis=1)
-
-                    image_path = (
-                        render_output_dir_for_testing / f"hamer_{person_id}.png"
-                    )
-                    print(f"Writing to {image_path}")
-                    render_output_dir_for_testing.mkdir(exist_ok=True, parents=True)
-                    iio.imwrite(image_path, (255 * final_img).astype(np.uint8))
-
-                    # Add all verts and cams to list
-                    verts = out["pred_vertices"][n].detach().cpu().numpy()
-                    is_right = batch["right"][n].cpu().numpy()
-                    verts[:, 0] = (2 * is_right - 1) * verts[:, 0]
 
         assert len(outputs) > 0
         stacked_outputs = HamerOutputs(
@@ -372,8 +314,87 @@ class HamerHelper:
                 for field_name in vars(outputs[0]).keys()
             },
         )
-        return stacked_outputs
+        # begin new brent stuff
+        verts = stacked_outputs.pred_vertices.numpy(force=True)
+        keypoints_3d = stacked_outputs.pred_keypoints_3d.numpy(force=True)
+        pred_cam_t = stacked_outputs.pred_cam_t.numpy(force=True)
+        mano_hand_pose = stacked_outputs.pred_mano_hand_pose.numpy(force=True)
+        mano_hand_betas = stacked_outputs.pred_mano_hand_betas.numpy(force=True)
+        R_camera_hand = stacked_outputs.pred_mano_global_orient.squeeze(dim=1).numpy(
+            force=True
+        )
 
+        is_right = (stacked_outputs.pred_right > 0.5).numpy(force=True)
+        is_left = ~is_right
+
+        if np.sum(is_right) == 0:
+            detections_right_wrt_cam = None
+        else:
+            detections_right_wrt_cam = {
+                "verts": verts[is_right] + pred_cam_t[is_right, None, :],
+                "keypoints_3d": keypoints_3d[is_right] + pred_cam_t[is_right, None, :],
+                "mano_hand_pose": mano_hand_pose[is_right],
+                "mano_hand_betas": mano_hand_betas[is_right],
+                "mano_hand_global_orient": R_camera_hand[is_right],
+                "faces": self.model.mano.faces.copy(),
+            }
+
+        if np.sum(is_left) == 0:
+            detections_left_wrt_cam = None
+        else:
+
+            def flip_rotmats(rotmats: np.ndarray) -> np.ndarray:
+                assert rotmats.shape[-2:] == (3, 3)
+                from viser import transforms
+                logspace = transforms.SO3.from_matrix(rotmats).log()
+                logspace[..., 1] *= -1
+                logspace[..., 2] *= -1
+                return transforms.SO3.exp(logspace).as_matrix()
+
+            detections_left_wrt_cam = {
+                "verts": verts[is_left] * np.array([-1, 1, 1])
+                + pred_cam_t[is_left, None, :],
+                "keypoints_3d": keypoints_3d[is_left] * np.array([-1, 1, 1])
+                + pred_cam_t[is_left, None, :],
+                "mano_hand_pose": flip_rotmats(mano_hand_pose[is_left]),
+                "mano_hand_betas": mano_hand_betas[is_left],
+                "mano_hand_global_orient": flip_rotmats(R_camera_hand[is_left]),
+                "faces": self.model.mano.faces[:, [0, 2, 1]].copy(),
+            }
+        # end new brent stuff
+        return detections_left_wrt_cam,detections_right_wrt_cam
+    
+    def render_detection(self, output_dict, hand_id, w, h, focal_length):
+        import pyrender
+        import trimesh
+        render_res = (h,w)
+        renderer = pyrender.OffscreenRenderer(viewport_width=render_res[1],
+                                              viewport_height=render_res[0],
+                                              point_size=1.0)
+
+        vertices = output_dict['verts'][hand_id]
+        faces = output_dict['faces']
+
+        mesh = trimesh.Trimesh(vertices.copy(), faces.copy())
+        mesh = pyrender.Mesh.from_trimesh(mesh)
+
+        scene = pyrender.Scene(bg_color=[*(1.0,1.0,1.0), 0.0],
+                               ambient_light=(0.3, 0.3, 0.3))
+        scene.add(mesh, 'mesh')
+
+        camera_center = [render_res[1] / 2., render_res[0] / 2.]
+        camera = pyrender.IntrinsicsCamera(fx=focal_length, fy=focal_length,
+                                           cx=camera_center[0], cy=camera_center[1], zfar=1e12,znear=.001)
+
+        # Create camera node and add it to pyRender scene
+        camera_pose = np.eye(4)
+        camera_pose[1:3,:] *= -1 #flip the y and z axes to match opengl
+        camera_node = pyrender.Node(camera=camera, matrix=camera_pose)
+        scene.add_node(camera_node)
+
+        color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        mask = color[...,-1] > 0
+        return color[...,:3],rend_depth, mask
 
 def main(
     input_images: list[Path],
@@ -404,20 +425,22 @@ def main(
             image = (image * 255).astype(np.uint8)
 
         # Run HaMeR.
-        hamer_outputs = hamer_helper.look_for_hands(
+        det_left,det_right = hamer_helper.look_for_hands(
             image=image,
-            focal_length=150.0,
-            # For most real-world applications, this should probably set to None.
-            render_output_dir_for_testing=render_output_dir / input_image.name,
+            focal_length=(1137.0/1280) * image.shape[1]
         )
 
-        # Do some printing.
-        if hamer_outputs is None:
-            print("No hands found!")
-        else:
-            print("Got HaMeR outputs! Here are the shapes")
-            for k, v in vars(hamer_outputs).items():
-                print(f"\t{k.ljust(20)} {v.shape}")
+        if det_left is not None:
+            rgb, depth,mask = hamer_helper.render_detection(det_left,0,1280,720,1137.0)
+        if det_right is not None:
+            rgb, depth,mask = hamer_helper.render_detection(det_right,0,1280,720,1137.0)
+        import matplotlib.pyplot as plt
+        fig,axs = plt.subplots(1,4)
+        axs[0].imshow(image)
+        axs[1].imshow(rgb)
+        axs[2].imshow(depth)
+        axs[3].imshow(mask)
+        plt.show()
 
 
 if __name__ == "__main__":
