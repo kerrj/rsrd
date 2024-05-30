@@ -565,11 +565,11 @@ class RigidGroupOptimizer:
 
     def load_trajectory(self, path: Path):
         """
-        Loads the trajectory from a file
+        Loads the trajectory from a file. Sets keyframes and hand_frames.
         """
         data = torch.load(path)
         self.keyframes = [d.cuda() for d in data["keyframes"]]
-        self.hand_frames = data['hand_frames']
+        # self.hand_frames = data['hand_frames']
         
     def reset_transforms(self):
         with torch.no_grad():

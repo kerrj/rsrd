@@ -253,35 +253,52 @@ def main(
                     if not curr_js_success.any():
                         break
 
-                    js_list.append(curr_js[..., :14])
-                    js_success_list.append(curr_js_success)
+                    js_list.append(curr_js[..., :14].cpu())
+                    js_success_list.append(curr_js_success.cpu())
                     prev_js = curr_js
                     last_keyframe = i
                 
-                # from the list of successful waypoints, we can optimize the trajectory.
-                poses_part2cam = toad_opt.get_parts2cam(keyframe=last_keyframe)
-                poses_part2world = [vtf.SE3(wxyz_xyz=np.array([*camera_frame.wxyz, *camera_frame.position])).multiply(pose) for pose in poses_part2cam]
-                grasp_cand_list = poses_part2world[part_handle.value].multiply(grasps_gripper)
-                goal_l_wxyz_xyz = torch.cat([
-                    torch.Tensor(grasp_cand_list.wxyz_xyz),
-                    torch.Tensor([[0, 1, 0, 0, 0.4, 0.2, 0.5]]).expand(grasp_cand_list.wxyz_xyz.shape[0], 7)
-                ])
-                goal_r_wxyz_xyz = torch.cat([
-                    torch.Tensor([[0, 1, 0, 0, 0.4, -0.2, 0.5]]).expand(grasp_cand_list.wxyz_xyz.shape[0], 7),
-                    torch.Tensor(grasp_cand_list.wxyz_xyz),
-                ])
-                goal_l = Pose(goal_l_wxyz_xyz[:, 4:], goal_l_wxyz_xyz[:, :4])
-                goal_r = Pose(goal_r_wxyz_xyz[:, 4:], goal_r_wxyz_xyz[:, :4])
-                import pdb; pdb.set_trace()
-                urdf._motion_gen.trajopt_solver.solve_batch(
-                    Goal(
-                        links_goal_pose={
-                            "gripper_l_base": goal_l,
-                            "gripper_r_base": goal_r
-                        },
-                    ),
-                    seed_traj=JointState(torch.cat(js_list, dim=1)),
-                )
+                # # from the list of successful waypoints, we can optimize the trajectory.
+                # poses_part2cam = toad_opt.get_parts2cam(keyframe=last_keyframe)
+                # poses_part2world = [vtf.SE3(wxyz_xyz=np.array([*camera_frame.wxyz, *camera_frame.position])).multiply(pose) for pose in poses_part2cam]
+                # grasp_cand_list = poses_part2world[part_handle.value].multiply(grasps_gripper)
+                # goal_l_wxyz_xyz = torch.cat([
+                #     torch.Tensor(grasp_cand_list.wxyz_xyz),
+                #     torch.Tensor([[0, 1, 0, 0, 0.4, 0.2, 0.5]]).expand(grasp_cand_list.wxyz_xyz.shape[0], 7)
+                # ])
+                # goal_r_wxyz_xyz = torch.cat([
+                #     torch.Tensor([[0, 1, 0, 0, 0.4, -0.2, 0.5]]).expand(grasp_cand_list.wxyz_xyz.shape[0], 7),
+                #     torch.Tensor(grasp_cand_list.wxyz_xyz),
+                # ])
+                # goal_l = Pose(goal_l_wxyz_xyz[:, 4:].contiguous().cuda(), goal_l_wxyz_xyz[:, :4].contiguous().cuda())
+                # goal_r = Pose(goal_r_wxyz_xyz[:, 4:].contiguous().cuda(), goal_r_wxyz_xyz[:, :4].contiguous().cuda())
+                # # import pdb; pdb.set_trace()
+                # start_state = JointState.from_position(approach_traj[:, -1, :14].cuda())
+                # goal_state = JointState.from_position(js_list[-1].squeeze().cuda())
+                # import pdb; pdb.set_trace()
+                # # this OOM's the memory...
+                # foo = urdf._trajopt_solver.solve_batch(
+                #     Goal(
+                #         # goal_state=goal_state,
+                #         # batch=goal_l_wxyz_xyz.shape[0],
+                #         # current_state=start_state,
+                #         # links_goal_pose={
+                #         #     "gripper_l_base": goal_l,
+                #         #     "gripper_r_base": goal_r
+                #         # },
+                #         # goal_state=goal_state,
+                #         goal_pose = goal_l,
+                #         batch=goal_l_wxyz_xyz.shape[0],
+                #         current_state=start_state,
+                #         links_goal_pose={
+                #             "gripper_l_base": goal_l,
+                #             "gripper_r_base": goal_r
+                #         },
+                #     ),
+                #     seed_traj=JointState(torch.cat(js_list[:28], dim=1).cuda()),
+                #     num_seeds=1,
+                # )
+                # print()
 
             # # TODO Retract trajectory.
             # with zed.raft_lock:

@@ -26,6 +26,7 @@ class HandRegistration:
             hand_mask = resize(
                     hand_mask.unsqueeze(0),
                     (obj_mask.shape[0], obj_mask.shape[1]),
+                    antialias = True,
                 ).permute(1, 2, 0).bool()
             obj_mask &= ~hand_mask
             obj_gauss_depth = gauss_depth[obj_mask]

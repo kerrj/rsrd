@@ -25,6 +25,7 @@ from curobo.geom.types import WorldConfig
 from curobo.geom.sdf.world import CollisionCheckerType, WorldCollision, WorldCollisionConfig
 from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
 from curobo.geom.types import Sphere, Cuboid
+from curobo.wrap.reacher.trajopt import TrajOptResult, TrajOptSolver, TrajOptSolverConfig
 
 def createTableWorld():
     """Create a simple world with a table, at z=0."""
@@ -149,6 +150,11 @@ class YumiCurobo:
         self._motion_gen.warmup(
             batch=motion_gen_batch_size,
         )
+
+        trajopt_config = TrajOptSolverConfig.load_from_robot_config(
+            robot_cfg,
+        )
+        self._trajopt_solver = TrajOptSolver(trajopt_config)
 
         self._viser_urdf = ViserUrdf(target, Path(urdf_path))
 
