@@ -41,8 +41,9 @@ from yumirws.yumi import YuMi
 
 def main(
     # config_path: Path = Path("outputs/buddha_balls_poly/dig/2024-05-23_184345/config.yml"),
-    config_path: Path = Path("outputs/mallet/dig/2024-05-27_180206/config.yml"),
-    keyframe_path: Path = Path("renders/mallet/keyframes.pt")
+    # config_path: Path = Path("outputs/mallet/dig/2024-05-27_180206/config.yml"),
+    config_path: Path = Path("outputs/nerfgun/dig/2024-05-30_210410/config.yml"),
+    keyframe_path: Path = Path("renders/nerfgun/keyframes.pt")
 ):
     """Quick interactive demo for object traj following.
 
@@ -58,6 +59,7 @@ def main(
         gripper_open_button = server.add_gui_button("Open physical gripper")
         gripper_close_button = server.add_gui_button("Close physical gripper")
         robot_handler = server.add_gui_button("Move robot")
+        restart_button = server.add_gui_button("Restart")
 
         robot = YuMi()
         @gripper_open_button.on_click
@@ -75,6 +77,14 @@ def main(
                 r_joints=urdf.get_right_joints().view(1, 7).cpu().numpy().astype(np.float64),
                 speed=(0.1, np.pi),
             )
+            robot.left.sync()
+            robot.right.sync()
+        @restart_button.on_click
+        def _(_):
+            nonlocal robot
+            del robot
+            robot = YuMi()
+        
 
     # Needs to be called before any warp pose gets called.
     wp.init()
@@ -261,6 +271,11 @@ def main(
                     if not curr_js_success.any():
                         break
 
+                    # if ((prev_js[:, :14] - curr_js[:, 0, :14]).abs() > 2*np.pi).any():
+                    #     mask = (prev_js[:, :14] - curr_js[:, 0, :14]) > 2*np.pi
+                    #     curr_js[:, 0, :14][mask] += 2*np.pi
+                    #     mask = (prev_js[..., :14] - curr_js[..., 0, :14]) < -2*np.pi
+                    #     curr_js[:, 0, :14][mask] -= 2*np.pi
                     js_list.append(curr_js[..., :14])
                     js_success_list.append(curr_js_success)
                     prev_js = curr_js
@@ -373,6 +388,8 @@ def main(
                     speed=(0.1, np.pi),
                     zone="z1",
                 )
+                robot.left.sync()
+                robot.right.sync()
                 robot.left.close_gripper()
                 robot.right.close_gripper()
                 time.sleep(1)
@@ -389,6 +406,8 @@ def main(
                     speed=(0.05, np.pi/5),
                     zone="z10",
                 )
+                robot.left.sync()
+                robot.right.sync()
                 # robot.move_joints_sync(
                 #     l_joints=traj[int(traj_handle.value)][30:, :7].cpu().numpy().astype(np.float64),
                 #     r_joints=traj[int(traj_handle.value)][30:, 7:].cpu().numpy().astype(np.float64),
