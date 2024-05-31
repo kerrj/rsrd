@@ -186,7 +186,7 @@ if __name__ == "__main__":
     import torch
     from viser import ViserServer
     zed = Zed()
-    zed.start_record("/home/chungmin/Documents/please2/toad/motion_vids/redbox_close_hand.svo2")
+    zed.start_record("/home/chungmin/Documents/please2/toad/motion_vids/redbox_moving.svo2")
     import os
     # os.makedirs(out_dir,exist_ok=True)
     i = 0

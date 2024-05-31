@@ -28,12 +28,13 @@ from curobo.geom.types import Sphere, Cuboid
 from curobo.wrap.reacher.trajopt import TrajOptResult, TrajOptSolver, TrajOptSolverConfig
 
 def createTableWorld():
-    """Create a simple world with a table, at z=0."""
+    """Create a simple world with a table, with the top surface at z=0."""
     cfg_dict = {
         "cuboid": {
             "table": {
                 "dims": [1.0, 1.0, 0.2],  # x, y, z
-                "pose": [0.0, 0.0, 0.00-0.1, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
+                # "pose": [0.0, 0.0, 0.00-0.1, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
+                "pose": [0.0, 0.0, 0.00-0.1-0.005-0.001, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
             },
         },
     }
@@ -72,6 +73,7 @@ class YumiCurobo:
         self._base_dir = Path(__file__).parent.parent
         self._tensor_args = TensorDeviceType()
 
+        # Create a base table for world collision.
         if world_config is None:
             world_config = createTableWorld()
 
@@ -116,8 +118,8 @@ class YumiCurobo:
         ik_config = IKSolverConfig.load_from_robot_config(
             robot_cfg,
             None,
-            rotation_threshold=0.05,
-            position_threshold=0.005,
+            rotation_threshold=0.01,
+            position_threshold=0.001,
             num_seeds=10,
             self_collision_check=True,
             self_collision_opt=True,
@@ -125,6 +127,8 @@ class YumiCurobo:
             tensor_args=self._tensor_args,
             collision_activation_distance=0.01,
             use_cuda_graph=True,
+            # regularization=False,
+            # use_gradient_descent=True,
         )
         self._ik_solver = IKSolver(ik_config)
         self._ik_solver_batch_size = ik_solver_batch_size
@@ -149,17 +153,18 @@ class YumiCurobo:
         self._motion_gen_batch_size = motion_gen_batch_size
         self._motion_gen.warmup(
             batch=motion_gen_batch_size,
+            warmup_js_trajopt=False,
         )
 
-        trajopt_config = TrajOptSolverConfig.load_from_robot_config(
-            robot_cfg,
-        )
-        self._trajopt_solver = TrajOptSolver(trajopt_config)
+        # trajopt_config = TrajOptSolverConfig.load_from_robot_config(
+        #     robot_cfg,
+        # )
+        # self._trajopt_solver = TrajOptSolver(trajopt_config)
 
         self._viser_urdf = ViserUrdf(target, Path(urdf_path))
 
         # Get the tooltip-to-gripper offset. TODO remove hardcoding...
-        self._tooltip_to_gripper = vtf.SE3.from_translation(np.array([0.0, 0.0, 0.128]))
+        self._tooltip_to_gripper = vtf.SE3.from_translation(np.array([0.0, 0.0, 0.138]))
 
         # Initialize the robot to the retracted position.
         self.joint_pos = self.home_pos
@@ -170,16 +175,21 @@ class YumiCurobo:
 
     @property
     def home_pos(self) -> torch.Tensor:
+        """The home position of the robot, from yumi's retract config."""
         _home_pos = self._robot_world.kinematics.retract_config
         assert type(_home_pos) == torch.Tensor and _home_pos.shape == (14,)
         return _home_pos
 
     @property
     def joint_pos(self) -> torch.Tensor:
+        """Gets the joint position of the robot in the visualizer."""
         return self._curr_cfg
 
     @joint_pos.setter
     def joint_pos(self, joint_pos: torch.Tensor):
+        """Sets the joint position of the robot, and updates the visualizer.
+        joint_pos may be of shape (14,) or (16,). If (16,), the last two elements are the gripper width.
+        If (14,), the gripper width is set to 0.025 (max gripper width)."""
         if len(joint_pos.shape) != 1:
             joint_pos = joint_pos.squeeze()
 
@@ -198,12 +208,15 @@ class YumiCurobo:
         self._curr_cfg = joint_pos
 
     def get_left_joints(self) -> torch.Tensor:
+        """Returns the left arm joint positions."""
         return self.joint_pos[:7]
 
     def get_right_joints(self) -> torch.Tensor:
+        """Gets the right arm joint positions."""
         return self.joint_pos[7:14]
 
     def update_world(self, world_config: WorldConfig):
+        """Update world collision model."""
         # Need to clear the world cache, as per in: https://github.com/NVlabs/curobo/issues/263.
         self._robot_world.clear_world_cache()
         self._robot_world.update_world(world_config)
@@ -212,6 +225,7 @@ class YumiCurobo:
         self,
         joint_pos: torch.Tensor,
     ) -> List[trimesh.Trimesh]:
+        """Returns the robot as a list of spheres, given the joint positions."""
         assert joint_pos.shape == (14,) or joint_pos.shape == (16,)
         spheres: List[Sphere] = self._robot_world.kinematics.get_robot_as_spheres(joint_pos)[0]
 
@@ -226,7 +240,7 @@ class YumiCurobo:
     def in_collision(self, q: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns d_world, d_self."""
         # get_world_coll_dist accepts b, h, dof.
-        q = urdf.joint_pos[:-2].unsqueeze(0).unsqueeze(0)
+        q = self.joint_pos[:-2].unsqueeze(0).unsqueeze(0)
         if len(q.shape) == 1:
             q = q.unsqueeze(0).unsqueeze(0)
         elif len(q.shape) == 2:
@@ -300,50 +314,6 @@ class YumiCurobo:
             return positions, success
 
         return result_list
-
-    def get_js_from_ik(
-        self,
-        ik_result_list: List[IKResult],
-        filter_success: bool = True,
-        filter_collision: bool = True,
-    ) -> Optional[torch.Tensor]:
-        ik_result_list = list(filter(lambda x: x.success.any(), ik_result_list))
-        if len(ik_result_list) == 0:
-            return None
-
-        traj_all = []
-        for ik_results in ik_result_list:
-            traj = ik_results.js_solution[ik_results.success].position
-            assert isinstance(traj, torch.Tensor) and len(traj.shape) == 2
-            if traj.shape[0] == 0:
-                continue
-            d_world, d_self = (
-                urdf._robot_world.get_world_self_collision_distance_from_joint_trajectory(
-                    traj.unsqueeze(1)
-                )
-            )
-            traj = traj[(d_world.squeeze() <= 0) & (d_self.squeeze() <= 0)]
-            if len(traj) > 0:
-                traj_all.append(traj.squeeze(1))
-
-        if len(traj_all) == 0:
-            print("No collision-free IK solution found.")
-            return None
-
-        return torch.cat(traj_all)
-    
-    def collides(
-        self,
-        joint_pos: torch.Tensor,
-        world_threshold: float = 0.0,
-    ) -> torch.Tensor:
-        original_joint_pos_shape = joint_pos.shape
-        joint_pos = joint_pos.view(-1, 14)
-        d_world, d_self = self._robot_world.get_world_self_collision_distance_from_joint_trajectory(
-            joint_pos.unsqueeze(1)
-        )
-        collides = (d_world.squeeze() > world_threshold) | (d_self.squeeze() > 0)
-        return collides.view(original_joint_pos_shape[:-1])
 
     def motiongen(
         self,

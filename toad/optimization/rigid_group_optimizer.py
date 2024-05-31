@@ -279,8 +279,8 @@ class RigidGroupOptimizer:
                 loss.backward()
                 tape.backward()
                 optimizer.step()
-                if whole_pose_adj.grad.norm() < 2e-2:
-                    break
+                # if whole_pose_adj.grad.norm() < 2e-2:
+                #     break
                 if render:
                     renders.append(dig_outputs["rgb"].detach())
             return dig_outputs, loss, whole_pose_adj.data.clone()

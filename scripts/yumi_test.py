@@ -40,8 +40,9 @@ from yumirws.yumi import YuMi
 
 
 def main(
-    config_path: Path = Path("outputs/buddha_balls_poly/dig/2024-05-23_184345/config.yml"),
-    keyframe_path: Path = Path("renders/buddha_balls_poly/keyframes.pt")
+    # config_path: Path = Path("outputs/buddha_balls_poly/dig/2024-05-23_184345/config.yml"),
+    config_path: Path = Path("outputs/mallet/dig/2024-05-27_180206/config.yml"),
+    keyframe_path: Path = Path("renders/mallet/keyframes.pt")
 ):
     """Quick interactive demo for object traj following.
 
@@ -72,7 +73,7 @@ def main(
             robot.move_joints_sync(
                 l_joints=urdf.get_left_joints().view(1, 7).cpu().numpy().astype(np.float64),
                 r_joints=urdf.get_right_joints().view(1, 7).cpu().numpy().astype(np.float64),
-                speed=(0.1, np.pi)
+                speed=(0.1, np.pi),
             )
 
     # Needs to be called before any warp pose gets called.
@@ -128,6 +129,13 @@ def main(
     # Visualize the keyframes.
     keyframe_ind = server.add_gui_slider("Keyframe Index",0.0,1.0,.01,0.0,disabled=True)
     toad_opt.optimizer.load_trajectory(keyframe_path)
+    kf_disable_checkbox = server.add_gui_checkbox("Disable keyframes", False)
+    @kf_disable_checkbox.on_update
+    def _(_):
+        if kf_disable_checkbox.value:
+            keyframe_ind.disabled = True
+        else:
+            keyframe_ind.disabled = False
 
     part_handle = server.add_gui_number("Part", 0, 0, toad_opt.num_groups-1, 1, disabled=True)
     # Set up the robot.
@@ -172,7 +180,7 @@ def main(
         # Update the object's pose, for collisionbody.
         world_config = createTableWorld()
         assert world_config.mesh is not None  # should not be none after post_init.
-        poses_part2cam = toad_opt.get_parts2cam()
+        poses_part2cam = toad_opt.get_parts2cam(keyframe=0)
         poses_part2world = [vtf.SE3(wxyz_xyz=np.array([*camera_frame.wxyz, *camera_frame.position])).multiply(pose) for pose in poses_part2cam]
         poses_wxyz_xyz = [pose.wxyz_xyz for pose in poses_part2world]
         mesh_list = toad_opt.toad_object.to_world_config(poses_wxyz_xyz=poses_wxyz_xyz)
@@ -242,8 +250,8 @@ def main(
                         get_pos_only=True
                     )
                     assert isinstance(curr_js, torch.Tensor) and isinstance(curr_js_success, torch.Tensor)
-                    curr_js_collides = urdf.collides(curr_js[..., :14].contiguous(), world_threshold=0.01)
-                    curr_js_success = curr_js_success & ~curr_js_collides
+                    d_world, d_self = urdf.in_collision(curr_js[..., :14].contiguous())
+                    curr_js_success = curr_js_success # & (d_world <= 0.005)
                     print(f"Time taken for IK: {time.time() - start:.2f} s")
                     assert isinstance(curr_js, torch.Tensor) and isinstance(curr_js_success, torch.Tensor)
                     assert len(curr_js.shape) == 3 and curr_js.shape[1] == 1, f"Should be [batch, 1, dof], but got shape: {curr_js.shape}"
@@ -253,8 +261,8 @@ def main(
                     if not curr_js_success.any():
                         break
 
-                    js_list.append(curr_js[..., :14].cpu())
-                    js_success_list.append(curr_js_success.cpu())
+                    js_list.append(curr_js[..., :14])
+                    js_success_list.append(curr_js_success)
                     prev_js = curr_js
                     last_keyframe = i
                 
@@ -275,9 +283,12 @@ def main(
                 # # import pdb; pdb.set_trace()
                 # start_state = JointState.from_position(approach_traj[:, -1, :14].cuda())
                 # goal_state = JointState.from_position(js_list[-1].squeeze().cuda())
-                # import pdb; pdb.set_trace()
+
+                # world_config = createTableWorld()
+                # urdf.update_world(world_config)
+
                 # # this OOM's the memory...
-                # foo = urdf._trajopt_solver.solve_batch(
+                # foo = urdf._motion_gen.js_trajopt_solver.solve_batch(
                 #     Goal(
                 #         # goal_state=goal_state,
                 #         # batch=goal_l_wxyz_xyz.shape[0],
@@ -297,8 +308,10 @@ def main(
                 #     ),
                 #     seed_traj=JointState(torch.cat(js_list[:28], dim=1).cuda()),
                 #     num_seeds=1,
+                #     newton_iters=2,
                 # )
-                # print()
+                # waypoint_traj = foo.interpolated_solution.position
+                # waypoint_success = foo.success.unsqueeze(-1).expand(-1, waypoint_traj.shape[1])
 
             # # TODO Retract trajectory.
             # with zed.raft_lock:
@@ -319,6 +332,8 @@ def main(
 
             traj = torch.cat([approach_traj, *js_list], dim=1)
             success = torch.cat([approach_success, *js_success_list], dim=1).all(dim=-1)  # i.e., all waypoints are successful.
+            # traj = torch.cat([approach_traj, waypoint_traj], dim=1)
+            # success = torch.cat([approach_success, waypoint_success], dim=1).all(dim=-1)  # i.e., all waypoints are successful.
             traj = traj[success]
 
         else:
@@ -350,12 +365,36 @@ def main(
 
         @move_traj_handle.on_click
         def _(_):
-            assert traj is not None
-            robot.move_joints_sync(
-                l_joints=traj[int(traj_handle.value)][:, :7].cpu().numpy().astype(np.float64),
-                r_joints=traj[int(traj_handle.value)][:, 7:].cpu().numpy().astype(np.float64),
-                speed=(0.1, np.pi)
-            )
+            with zed.raft_lock:
+                assert traj is not None
+                robot.move_joints_sync(
+                    l_joints=traj[int(traj_handle.value)][:30, :7].cpu().numpy().astype(np.float64),
+                    r_joints=traj[int(traj_handle.value)][:30, 7:].cpu().numpy().astype(np.float64),
+                    speed=(0.1, np.pi),
+                    zone="z1",
+                )
+                robot.left.close_gripper()
+                robot.right.close_gripper()
+                time.sleep(1)
+                foo = traj[int(traj_handle.value)][30:].cpu().numpy().astype(np.float64)
+                for _ in range(5):
+                    blur_foo = 0.5*foo + 0.25*np.roll(foo, 1, axis=0) + 0.25*np.roll(foo, -1, axis=0)
+                    blur_foo[0] = foo[0]
+                    blur_foo[-1] = foo[-1]
+                    foo = blur_foo
+
+                robot.move_joints_sync(
+                    l_joints=foo[:, :7],
+                    r_joints=foo[:, 7:],
+                    speed=(0.05, np.pi/5),
+                    zone="z10",
+                )
+                # robot.move_joints_sync(
+                #     l_joints=traj[int(traj_handle.value)][30:, :7].cpu().numpy().astype(np.float64),
+                #     r_joints=traj[int(traj_handle.value)][30:, 7:].cpu().numpy().astype(np.float64),
+                #     speed=(0.1, np.pi),
+                #     zone="z10",
+                # )
 
 
     while True:
@@ -375,6 +414,13 @@ def main(
                         axes_length=0.02,
                         axes_radius=.002
                     )
+                if keyframe is not None:
+                    toad_opt.optimizer.apply_keyframe(keyframe)
+                    hands = toad_opt.optimizer.hand_frames[keyframe]
+                    for ih,h in enumerate(hands):
+                        h_world = h.copy()
+                        h_world.apply_transform(toad_opt.optimizer.get_registered_o2w().cpu().numpy())
+                        server.add_mesh_trimesh(f"hand{ih}", h_world, scale=1/toad_opt.optimizer.dataset_scale)
             
         # Visualize pointcloud.
         K = torch.from_numpy(zed.get_K()).float().cuda()
