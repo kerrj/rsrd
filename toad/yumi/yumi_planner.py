@@ -27,18 +27,8 @@ from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
 from curobo.geom.types import Sphere, Cuboid
 from curobo.wrap.reacher.trajopt import TrajOptResult, TrajOptSolver, TrajOptSolverConfig
 
-
-def createTableWorld():
-    """Create a simple world with a table, with the top surface at z=0."""
-    cfg_dict = {
-        "cuboid": {
-            "table": {
-                "dims": [1.0, 1.0, 0.2],  # x, y, z
-                "pose": [0.0, 0.0, 0.00-0.1, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
-            },
-        },
-    }
-    return WorldConfig.from_dict(cfg_dict)
+# TODO decide if 14, or 16,. -- gripper...?
+# TODO add size checks at some point.
 
 
 class YumiPlanner:
@@ -58,6 +48,7 @@ class YumiPlanner:
     def __init__(
         self,
         batch_size: int,
+        table_height: float,
     ):
         # check if cuda is available
         if not torch.cuda.is_available():
@@ -68,7 +59,7 @@ class YumiPlanner:
         # Create a base table for world collision.
         self._batch_size = batch_size
         self._setup(
-            world_config=createTableWorld(),
+            world_config=self.createTableWorld(table_height),
         )
 
     def _setup(
@@ -106,12 +97,26 @@ class YumiPlanner:
         self._ik_solver = IKSolver(ik_config)
         self._ik_solver_batch_size = self._batch_size 
 
-        # Set up trajopt.
-        trajopt_config = TrajOptSolverConfig.load_from_robot_config(
+        # Set up motion planning! This considers collisions.
+        motion_gen_config = MotionGenConfig.load_from_robot_config(
             robot_cfg,
+            None,
+            rotation_threshold=0.05,
+            position_threshold=0.005,
+            num_ik_seeds=10,
+            num_trajopt_seeds=4,
+            interpolation_dt=0.25,
+            trajopt_dt=0.25,
+            collision_activation_distance=0.01,
+            interpolation_steps=30,
             world_coll_checker=self._robot_world.world_model,
+            use_cuda_graph=True,
         )
-        self._trajopt_solver = TrajOptSolver(trajopt_config)
+        self._motion_gen = MotionGen(motion_gen_config)
+        self._motion_gen.warmup(
+            batch=self._batch_size,
+            warmup_js_trajopt=False,
+        )
 
     @property
     def device(self) -> torch.device:
@@ -123,6 +128,19 @@ class YumiPlanner:
         _home_pos = self._robot_world.kinematics.retract_config
         assert type(_home_pos) == torch.Tensor and _home_pos.shape == (14,)
         return _home_pos
+
+    @staticmethod
+    def createTableWorld(table_height):
+        """Create a simple world with a table, with the top surface at z={table_height}."""
+        cfg_dict = {
+            "cuboid": {
+                "table": {
+                    "dims": [1.0, 1.0, 0.2],  # x, y, z
+                    "pose": [0.0, 0.0, 0.00-table_height, 1, 0, 0, 0.0],  # x, y, z, qw, qx, qy, qz
+                },
+            },
+        }
+        return WorldConfig.from_dict(cfg_dict)
 
     def update_world(self, world_config: WorldConfig):
         """Update world collision model."""
@@ -141,12 +159,12 @@ class YumiPlanner:
         elif len(q.shape) == 2:
             q = q.unsqueeze(1)
         assert len(q.shape) == 3
-
         d_world, d_self = self._robot_world.get_world_self_collision_distance_from_joint_trajectory(q)
 
         return (d_world.squeeze(), d_self.squeeze())
 
     def fk(self, q: torch.Tensor) -> CudaRobotModelState:
+        """Get the forward kinematics of the robot, given the joint positions."""
         if len(q.shape) == 1:
             q = q.unsqueeze(0)
         assert len(q.shape) == 2
@@ -159,14 +177,24 @@ class YumiPlanner:
         goal_l_wxyz_xyz: torch.Tensor,
         goal_r_wxyz_xyz: torch.Tensor,
         initial_js: Optional[torch.Tensor] = None,
-        get_pos_only: bool = False,
-    ) -> Union[List[IKResult], Tuple[torch.Tensor, torch.Tensor]]:
-        """Solve IK for both arms simultaneously."""
+        get_result: bool = False,
+    ) -> Union[List[IKResult], Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
+        """Solve IK for both arms simultaneously.
+        goal_*_wxyz_xyz: [n, 7] tensor, where the first 4 elements are the quaternion, and the last 3 are the position.
+        initial_js is a [n, dof] or [dof] tensor, where dof is 14.
+
+        returns [n, dof] (position) and [n,] (success).
+
+        If get_result is True, returns the generated IKResults.
+        If no solutions are found using `pos_only`, will return None.
+        """
         assert len(goal_l_wxyz_xyz.shape) == 2 and len(goal_r_wxyz_xyz.shape) == 2
         assert goal_l_wxyz_xyz.shape[-1] == 7 and goal_r_wxyz_xyz.shape[-1] == 7
         assert goal_l_wxyz_xyz.shape == goal_r_wxyz_xyz.shape
         assert goal_l_wxyz_xyz.shape[0] % self._ik_solver_batch_size == 0
         assert goal_r_wxyz_xyz.shape[0] % self._ik_solver_batch_size == 0
+
+        batch_size = goal_l_wxyz_xyz.shape[0]
 
         goal_l_wxyz_xyz = goal_l_wxyz_xyz.to(self.device).float()
         goal_r_wxyz_xyz = goal_r_wxyz_xyz.to(self.device).float()
@@ -176,12 +204,13 @@ class YumiPlanner:
 
         if initial_js is not None:
             initial_js = initial_js.to(self.device).float()
-        
+
             if len(initial_js.shape) == 1:
                 initial_js = initial_js.unsqueeze(0).expand(goal_l_wxyz_xyz.shape[0], -1)
             assert len(initial_js.shape) == 2, f"Should be of size [batch, dof], instead got: {initial_js.shape}"
             assert initial_js.shape[0] == goal_l_wxyz_xyz.shape[0]
             initial_js = initial_js.unsqueeze(1) # n, batch, dof.
+            assert initial_js.shape[-1] == 14
 
         result_list: List[IKResult] = []
         for i in range(0, goal_l_wxyz_xyz.shape[0], self._ik_solver_batch_size):
@@ -195,57 +224,76 @@ class YumiPlanner:
             )
             result_list.append(result)
 
-        if get_pos_only:
-            positions = torch.cat([
-                result.js_solution.position for result in result_list  # type: ignore
-            ], dim=0)  # [batch, time, dof]
-            success = torch.cat([
-                result.success for result in result_list  # type: ignore
-            ], dim=0)
+        if get_result:
+            return result_list
 
-            # Pad success shape, to be [batch, 1].
-            if len(success.shape) == 1:
-                success = success.unsqueeze(-1)
-            return positions, success
+        result_list = list(filter(lambda x: x.success.any(), result_list))
+        if len(result_list) == 0:
+            return None, None
 
-        return result_list
+        # js_solution is [batch, time, dof] tensor!
+        positions = torch.cat([
+            result.js_solution.position for result in result_list  # type: ignore
+        ], dim=0)  # [batch, time, dof]
+        success = torch.cat([
+            result.success for result in result_list  # type: ignore
+        ], dim=0)
 
-    def motiongen(
+        assert positions.shape[1] == 1  # Only one time step.
+        positions = positions.squeeze(1)
+        success = success.squeeze(1)
+        positions = positions[..., :14]  # Remove the gripper joints.
+
+        assert positions.shape == (batch_size, 14) and success.shape == (batch_size,)
+
+        return positions, success
+
+
+    def gen_motion_from_goal(
         self,
         goal_l_wxyz_xyz: torch.Tensor,
         goal_r_wxyz_xyz: torch.Tensor,
-        start_state: Optional[Union[JointState, torch.Tensor]] = None,
+        initial_js: Optional[torch.Tensor] = None,
         start_l_wxyz_xyz: Optional[torch.Tensor] = None,
         start_r_wxyz_xyz: Optional[torch.Tensor] = None,
-        get_pos_only: bool = False,
-    ) -> Union[List[MotionGenResult], Tuple[torch.Tensor, torch.Tensor]]:
+        get_result: bool = False,
+    ) -> Union[List[MotionGenResult], Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
+        """
+        Generate collision-free motion plans for both arms simultaneously.
+        goal_*_wxyz_xyz: [batch, 7] tensor, where the first 4 elements are the quaternion, and the last 3 are the position.
+
+        returns [batch, time, dof] (position) and [batch,] (success).
+
+        If get_result is True, returns the MotionGenResult list.
+        If no solutions are found using `pos_only`, will return None.
+        """
         # Takes around ~0.1 seconds
         assert len(goal_l_wxyz_xyz.shape) == 2 and len(goal_r_wxyz_xyz.shape) == 2
-        assert goal_l_wxyz_xyz.shape[0] % self._motion_gen_batch_size == 0
-        assert goal_r_wxyz_xyz.shape[0] % self._motion_gen_batch_size == 0
+        assert goal_l_wxyz_xyz.shape[0] % self._batch_size == 0
+        assert goal_r_wxyz_xyz.shape[0] % self._batch_size == 0
+        batch_size = goal_l_wxyz_xyz.shape[0]
 
-        if start_state is None:
+        if initial_js is None:
             if (start_l_wxyz_xyz is not None and start_r_wxyz_xyz is not None):
                 start_l_wxyz_xyz = start_l_wxyz_xyz.to(self.device).float()
                 start_r_wxyz_xyz = start_r_wxyz_xyz.to(self.device).float()
-                ik_result = self.ik(start_l_wxyz_xyz, start_r_wxyz_xyz)
-                joint_state_list = [ik_result[i].js_solution for i in range(len(ik_result))]
-                start_state = JointState.from_position(torch.cat([js.position for js in joint_state_list], dim=0))  # type: ignore
+                js, _ = self.ik(
+                    start_l_wxyz_xyz, start_r_wxyz_xyz
+                )
+                assert js is not None, "Failed to generate initial joint states."
+                assert isinstance(js, torch.Tensor)
+                initial_js = js
             else:
                 raise ValueError("Either start_state or start_l_wxyz_xyz and start_r_wxyz_xyz must be provided.")
 
         # Make sure that start_state is a batched tensor (bxdof), without gripper.
-        if isinstance(start_state, JointState):
-            start_joints = start_state.position
-        elif isinstance(start_state, torch.Tensor):
-            start_joints = start_state
-        assert isinstance(start_joints, torch.Tensor)
-        if len(start_joints.shape) == 1:
-            start_joints = start_joints.expand(goal_l_wxyz_xyz.shape[0], -1)
-        assert len(start_joints.shape) == 2 and start_joints.shape[0] == goal_l_wxyz_xyz.shape[0]
-        if start_joints.shape[-1] == 16:
-            start_joints = start_joints[:, :14]
-        start_state = JointState.from_position(start_joints.cuda())
+        assert isinstance(initial_js, torch.Tensor)
+        if len(initial_js.shape) == 1:
+            initial_js = initial_js.expand(goal_l_wxyz_xyz.shape[0], -1)
+        assert len(initial_js.shape) == 2 and initial_js.shape[0] == goal_l_wxyz_xyz.shape[0]
+        if initial_js.shape[-1] == 16:
+            initial_js = initial_js[:, :14]
+        start_state = JointState.from_position(initial_js.cuda())
 
         # Set the goal poses.
         goal_l_wxyz_xyz = goal_l_wxyz_xyz.to(self.device).float()
@@ -263,7 +311,6 @@ class YumiPlanner:
                 MotionGenPlanConfig(
                     max_attempts=60,
                     parallel_finetune=True,
-                    # enable_finetune_trajopt=False,
                     enable_graph=True,
                     need_graph_success=True,
                     ik_fail_return=5,
@@ -275,20 +322,77 @@ class YumiPlanner:
             )
             result_list.append(result)
 
-        if get_pos_only:
-            positions = torch.cat([
-                result.interpolated_plan.position for result in result_list  # type: ignore
-            ], dim=0)  # [batch, time, dof]
-            success = torch.cat([
-                result.success for result in result_list  # type: ignore
-            ], dim=0)
+        if get_result:
+            return result_list
 
-            # # Pad success shape, to be [batch, time].
-            # if len(success.shape) == 1:
-            #     success = success.unsqueeze(-1).expand(-1, positions.shape[1])
-            # assert positions.shape[0] == success.shape[0]
-            # assert positions.shape[1] == success.shape[1]
+        result_list = list(filter(lambda x: (x.interpolated_plan is not None), result_list))
+        if len(result_list) == 0:
+            return None, None
 
-            return positions, success
+        positions = torch.cat([
+            result.interpolated_plan.position for result in result_list  # type: ignore
+        ], dim=0)  # [batch, time, dof]
+        success = torch.cat([
+            result.success for result in result_list  # type: ignore
+        ], dim=0)
 
-        return result_list
+        if len(positions.shape) == 2:
+            assert batch_size == 1, "Number of trajs is not 1, but positions is TxDOF."
+            positions = positions.unsqueeze(0)
+
+        assert positions.shape == (batch_size, self._motion_gen.interpolation_steps, 14)
+        assert success.shape == (batch_size,)
+
+        return positions, success
+
+    def gen_motion_from_ik_chain(
+        self,
+        path_l_wxyz_xyz: torch.Tensor,
+        path_r_wxyz_xyz: torch.Tensor,
+        initial_js: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Generate a motion plan from a given path. If IK fails at any point, the motion generation stops.
+        path_*_wxyz_xyz: [batch, time, 7] tensor, where the first 4 elements are the quaternion, and the last 3 are the position.
+        initial_js: [batch, dof] tensor, where dof is 14.
+        If no solutions are found, will return None.
+
+        returns [batch, time, dof] (position) and [batch, time] (success).
+        success might not be true throughout the full trajectory! is success for every timestep in every batch.
+        """
+        assert path_l_wxyz_xyz.shape == path_r_wxyz_xyz.shape
+        assert len(path_l_wxyz_xyz.shape) == 3 and path_l_wxyz_xyz.shape[-1] == 7
+        assert path_l_wxyz_xyz.shape[0] % self._batch_size == 0
+        assert (
+            initial_js.shape[0] == path_l_wxyz_xyz.shape[0]
+            and initial_js.shape[-1] == 14
+            and len(initial_js.shape) == 2
+        )
+        batch_size = path_l_wxyz_xyz.shape[0]
+
+        # TODO We also want to smoothen this out!
+        js_list: List[torch.Tensor] = []
+        js_success_list: List[torch.Tensor] = []
+        for idx in range(path_l_wxyz_xyz.shape[1]):
+            goal_l_wxyz_xyz = path_l_wxyz_xyz[:, idx].view(-1, 7)
+            goal_r_wxyz_xyz = path_r_wxyz_xyz[:, idx].view(-1, 7)
+
+            assert goal_l_wxyz_xyz.shape == (batch_size, 7)
+            assert goal_r_wxyz_xyz.shape == (batch_size, 7)
+            assert initial_js.shape == (batch_size, 14)
+
+            # Get the current joint locations.
+            curr_js, curr_success = self.ik(
+                goal_l_wxyz_xyz=goal_l_wxyz_xyz,
+                goal_r_wxyz_xyz=goal_r_wxyz_xyz,
+                initial_js=initial_js,
+            )
+            assert isinstance(curr_js, torch.Tensor) and isinstance(curr_success, torch.Tensor)
+            assert curr_js.shape == (batch_size, 14) and curr_success.shape == (batch_size,)
+
+            initial_js = curr_js
+            js_list.append(initial_js.unsqueeze(1))  # [batch, 1, dof]
+            js_success_list.append(curr_success.unsqueeze(dim=1))  # [batch, 1]
+
+        # Stack along time dimension -- [batch, time, dof].
+        return torch.cat(js_list, dim=1), torch.cat(js_success_list, dim=1)
