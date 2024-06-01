@@ -28,7 +28,18 @@ from toad.optimization.atap_loss import ATAPLoss
 from toad.utils import *
 import viser.transforms as vtf
 import trimesh
-
+def getBack(var_grad_fn):
+    print(var_grad_fn)
+    for n in var_grad_fn.next_functions:
+        if n[0]:
+            try:
+                tensor = getattr(n[0], 'variable')
+                print(n[0])
+                print('Tensor with grad found:', tensor)
+                print(' - gradient:', tensor.grad)
+                print()
+            except AttributeError as e:
+                getBack(n[0])
 
 def quatmul(q0: torch.Tensor, q1: torch.Tensor):
     w0, x0, y0, z0 = torch.unbind(q0, dim=-1)
@@ -124,7 +135,7 @@ class RigidGroupOptimizer:
     pose_lr: float = 0.005
     pose_lr_final: float = 0.001
     mask_hands: bool = False
-    use_roi: bool = False
+    use_roi: bool = True
 
     init_p2o: torch.Tensor
     """From: part, To: object. in current world frame. Part frame is centered at part centroid, and object frame is centered at object centroid."""
@@ -150,10 +161,10 @@ class RigidGroupOptimizer:
         # detach all the params to avoid retain_graph issue
         self.dig_model.gauss_params["means"] = self.dig_model.gauss_params[
             "means"
-        ].detach()
+        ].detach().clone()
         self.dig_model.gauss_params["quats"] = self.dig_model.gauss_params[
             "quats"
-        ].detach()
+        ].detach().clone()
         self.dino_loader = dino_loader
         self.group_labels = group_labels
         self.group_masks = group_masks
@@ -183,7 +194,7 @@ class RigidGroupOptimizer:
         self.render_lock = render_lock
         if self.use_atap:
             self.atap = ATAPLoss(dig_model, group_masks, group_labels, self.dataset_scale)
-        self.init_c2o = deepcopy(init_c2o).to("cuda")
+        self.init_c2o = deepcopy(init_c2o).to("cuda")._apply_fn_to_fields(torch.detach)
         self._init_centroids()
         # Save the initial object to world transform, and initial part to object transforms
         self.init_o2w = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
@@ -222,7 +233,7 @@ class RigidGroupOptimizer:
             whole_obj_centroids = self.dig_model.means.mean(dim=0, keepdim=True).repeat(
                 self.dig_model.num_points, 1
             )
-            whole_pose_adj = start_pose_adj.clone()
+            whole_pose_adj = start_pose_adj.detach().clone()
             whole_pose_adj = torch.nn.Parameter(whole_pose_adj)
             optimizer = torch.optim.Adam([whole_pose_adj], lr=0.01)
             for i in range(niter):
@@ -284,7 +295,7 @@ class RigidGroupOptimizer:
                 if render:
                     renders.append(dig_outputs["rgb"].detach())
             self.is_initialized = True
-            return dig_outputs, loss, whole_pose_adj.data.clone()
+            return dig_outputs, loss, whole_pose_adj.data.detach().clone()
 
         best_loss = float("inf")
 
@@ -297,7 +308,8 @@ class RigidGroupOptimizer:
                 0, self.dig_model.num_points, (n_gauss,), device="cuda"
             )
             nn_inputs = self.dig_model.gauss_params["dino_feats"][samps]
-            dino_feats = self.dig_model.nn(nn_inputs.half()).float()  # NxC
+            # dino_feats = self.dig_model.nn(nn_inputs.half()).float()  # NxC
+            dino_feats = self.dig_model.nn(nn_inputs)  # NxC
             downsamp_factor = 4
             downsamp_frame_feats = self.frame_pca_feats[
                 ::downsamp_factor, ::downsamp_factor, :
@@ -392,7 +404,7 @@ class RigidGroupOptimizer:
         """
         returns the transform from part_i to world at keyframe index given
         """
-        p_delta = self.pose_deltas.detach()
+        p_delta = self.pose_deltas.detach().clone()
         R_delta = torch.from_numpy(vtf.SO3(p_delta[i, 3:].cpu().numpy()).as_matrix()).float().cuda()
         # we premultiply by rotation matrix to line up the 
         initial_part2world = self.get_initial_part2world(i)
@@ -436,12 +448,12 @@ class RigidGroupOptimizer:
                     self.apply_to_model(
                         self.pose_deltas, self.centroids, self.group_labels
                     )
-                dig_outputs = self.dig_model.get_outputs(deepcopy(roi_cam))
+                dig_outputs = self.dig_model.get_outputs(roi_cam)
             if "dino" not in dig_outputs:
                 self.reset_transforms()
                 raise RuntimeError("Lost tracking")
             with torch.no_grad():
-                object_mask = dig_outputs["accumulation"] > 0.9
+                object_mask = dig_outputs["accumulation"] > 0.8
             dino_feats = (
                 self.blur(dig_outputs["dino"].permute(2, 0, 1)[None])
                 .squeeze()
@@ -485,16 +497,13 @@ class RigidGroupOptimizer:
             if use_rgb:
                 loss = loss + 0.05 * (dig_outputs["rgb"] - self.rgb_frame).abs().mean()
             if self.use_atap:
-                null_weights = torch.ones_like(self.connectivity_weights)
-                # null_weights = self.connectivity_weights.exp()
-                weights = torch.clip(null_weights, 0, 1)
+                weights = torch.ones_like(self.connectivity_weights)
                 with tape:
                     atap_loss = self.atap(weights)
-                rigidity_loss = 0.02 * (1 - weights).mean()
-                symmetric_loss = (weights - weights.T).abs().mean()
-                # maximize the connectivity weights, as well as similarity
-                loss = loss + atap_loss + symmetric_loss + rigidity_loss
+                loss = loss + atap_loss
             loss.backward()
+            # getBack(loss.grad_fn)
+            # input()
             tape.backward()
             self.optimizer.step()
             # self.weights_optimizer.step()
@@ -505,10 +514,10 @@ class RigidGroupOptimizer:
             with self.render_lock:
                 self.dig_model.eval()
                 self.apply_to_model(
-                        self.pose_deltas, self.centroids, self.group_labels
+                        self.pose_deltas.detach(), self.centroids, self.group_labels
                     )
-                full_outputs = self.dig_model.get_outputs(deepcopy(self.init_c2o))
-        return {k:i.clone() for k,i in full_outputs.items()}
+                full_outputs = self.dig_model.get_outputs(self.init_c2o)
+        return {k:i.detach().clone() for k,i in full_outputs.items()}
 
     def apply_to_model(self, pose_deltas, centroids, group_labels):
         """
@@ -590,8 +599,8 @@ class RigidGroupOptimizer:
         
     def reset_transforms(self):
         with torch.no_grad():
-            self.dig_model.gauss_params["means"] = self.init_means.clone()
-            self.dig_model.gauss_params["quats"] = self.init_quats.clone()
+            self.dig_model.gauss_params["means"] = self.init_means.detach().clone()
+            self.dig_model.gauss_params["quats"] = self.init_quats.detach().clone()
     
     def get_ROI(self, inflate = .15):
         """
@@ -604,7 +613,7 @@ class RigidGroupOptimizer:
         with torch.no_grad():
             with self.render_lock:
                 self.dig_model.eval()
-                self.apply_to_model(self.pose_deltas, self.centroids, self.group_labels)
+                self.apply_to_model(self.pose_deltas.detach(), self.centroids, self.group_labels)
                 object_mask = self.dig_model.get_outputs(self.init_c2o)["accumulation"] > 0.7
             valids = torch.where(object_mask)
             inflate_amnt = (inflate*(valids[0].max() - valids[0].min()).item(), inflate*(valids[1].max() - valids[1].min()).item())
@@ -623,13 +632,16 @@ class RigidGroupOptimizer:
         """
         assert self.use_roi
         ymin, ymax, xmin, xmax = roi
-        newcam = deepcopy(self.init_c2o)
-        newcam.height = torch.tensor(ymax - ymin,device='cuda').view(1,1).int()
-        newcam.width = torch.tensor(xmax - xmin,device='cuda').view(1,1).int()
-        newcam.cx = torch.tensor(self.init_c2o.cx - xmin,device='cuda').view(1,1)
-        newcam.cy = torch.tensor(self.init_c2o.cy - ymin,device='cuda').view(1,1)
+        height = torch.tensor(ymax - ymin,device='cuda').view(1,1).int()
+        width = torch.tensor(xmax - xmin,device='cuda').view(1,1).int()
+        cx = torch.tensor(self.init_c2o.cx.detach().clone() - xmin,device='cuda').view(1,1)
+        cy = torch.tensor(self.init_c2o.cy.detach().clone() - ymin,device='cuda').view(1,1)
+        newcam = Cameras(self.init_c2o.camera_to_worlds.detach().clone(),
+                         self.init_c2o.fx.detach().clone(),self.init_c2o.fy.detach().clone(),
+                         cx.detach().clone(),cy.detach().clone(),
+                         width.detach().clone(),height.detach().clone())
         newcam.rescale_output_resolution(500/max(newcam.width,newcam.height))
-        return deepcopy(newcam)
+        return newcam
     
     def set_frame(self, rgb_frame: torch.Tensor, depth: Optional[torch.Tensor] = None):
         """
@@ -641,11 +653,11 @@ class RigidGroupOptimizer:
             ymin,ymax,xmin,xmax = self.get_ROI()
             roi_cam = self.get_ROI_cam((ymin,ymax,xmin,xmax))
             # ROI is determined inside the global camera, so we need to convert it to the right resolution
-            ymin,ymax = int((ymin/self.init_c2o.height)*(rgb_frame.shape[0]-1)),int((ymax/self.init_c2o.height)*(rgb_frame.shape[0]-1))
-            xmin,xmax = int((xmin/self.init_c2o.width)*(rgb_frame.shape[1]-1)),int((xmax/self.init_c2o.width)*(rgb_frame.shape[1]-1))
-            rgb_frame = rgb_frame[ymin:ymax,xmin:xmax].clone()
+            ymin,ymax = int((ymin/(self.init_c2o.height-1))*(rgb_frame.shape[0]-1)),int((ymax/(self.init_c2o.height-1))*(rgb_frame.shape[0]-1))
+            xmin,xmax = int((xmin/(self.init_c2o.width-1))*(rgb_frame.shape[1]-1)),int((xmax/(self.init_c2o.width-1))*(rgb_frame.shape[1]-1))
+            rgb_frame = rgb_frame[ymin:ymax,xmin:xmax].detach().clone()
             if self.use_depth and depth is not None:
-                depth = depth[ymin:ymax,xmin:xmax]
+                depth = depth[ymin:ymax,xmin:xmax].detach().clone()
         else:
             roi_cam = self.init_c2o
 
