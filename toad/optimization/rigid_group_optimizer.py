@@ -59,9 +59,8 @@ def depth_ranking_loss(rendered_depth, gt_depth):
     out_diff = rendered_depth[::2, :] - rendered_depth[1::2, :] + m
     differing_signs = torch.sign(dpt_diff) != torch.sign(out_diff)
     loss = out_diff[differing_signs] * torch.sign(out_diff[differing_signs])
-    # med = loss.quantile(0.8)
-    return loss.mean()
-    # return loss[loss < med].mean()
+    med = loss.quantile(0.6)
+    return loss[loss < med].mean()
 
 
 @wp.kernel
@@ -123,7 +122,7 @@ class RigidGroupOptimizer:
     depth_ignore_threshold: float = 0.1  # in meters
     use_atap: bool = True
     pose_lr: float = 0.005
-    pose_lr_final: float = 0.001
+    pose_lr_final: float = 0.0005
     mask_hands: bool = False
     use_roi: bool = True
 
@@ -183,7 +182,7 @@ class RigidGroupOptimizer:
         # lock to prevent blocking the render thread if provided
         self.render_lock = render_lock
         if self.use_atap:
-            self.atap = ATAPLoss(dig_model, group_masks, group_labels)
+            self.atap = ATAPLoss(dig_model, group_masks, group_labels, self.dataset_scale)
         self.init_c2o = deepcopy(init_c2o).to("cuda")
         self._init_centroids()
         # Save the initial object to world transform, and initial part to object transforms
@@ -278,7 +277,7 @@ class RigidGroupOptimizer:
                         rend_samples = disparity[rand_samples]
                         mono_samples = self.frame_depth[rand_samples]
                         rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                        loss = loss + 0.1 * rank_loss
+                        loss = loss + 0.5 * rank_loss
                 loss.backward()
                 tape.backward()
                 optimizer.step()
@@ -482,7 +481,7 @@ class RigidGroupOptimizer:
                     rend_samples = disparity[rand_samples]
                     mono_samples = self.frame_depth[rand_samples]
                     rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                    loss = loss + .1*rank_loss
+                    loss = loss + .5*rank_loss
             if use_rgb:
                 loss = loss + 0.05 * (dig_outputs["rgb"] - self.rgb_frame).abs().mean()
             if self.use_atap:
