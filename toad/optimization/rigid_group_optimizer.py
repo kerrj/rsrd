@@ -125,6 +125,7 @@ class RigidGroupOptimizer:
     pose_lr: float = 0.005
     pose_lr_final: float = 0.001
     mask_hands: bool = False
+    use_roi: bool = True
 
     init_p2o: torch.Tensor
     """From: part, To: object. in current world frame. Part frame is centered at part centroid, and object frame is centered at object centroid."""
@@ -145,6 +146,7 @@ class RigidGroupOptimizer:
         """
         self.dataset_scale = dataset_scale
         self.tape = None
+        self.is_initialized = False
         self.dig_model = dig_model
         # detach all the params to avoid retain_graph issue
         self.dig_model.gauss_params["means"] = self.dig_model.gauss_params[
@@ -212,6 +214,7 @@ class RigidGroupOptimizer:
 
     def initialize_obj_pose(self, niter=200, n_seeds=6, render=False, metric_depth = True):
         renders = []
+        assert not self.is_initialized, "Can only initialize once"
 
         def try_opt(start_pose_adj,niter, depth = False):
             "tries to optimize the pose, returns None if failed, otherwise returns outputs and loss"
@@ -246,7 +249,7 @@ class RigidGroupOptimizer:
                 )
                 pix_loss = self.frame_pca_feats - dino_feats
                 loss = pix_loss.norm(dim=-1).mean()
-                if depth:
+                if depth and self.use_depth:
                     object_mask = dig_outputs["accumulation"] > 0.9
                     if metric_depth:
                         physical_depth = dig_outputs["depth"] / self.dataset_scale
@@ -279,10 +282,9 @@ class RigidGroupOptimizer:
                 loss.backward()
                 tape.backward()
                 optimizer.step()
-                # if whole_pose_adj.grad.norm() < 2e-2:
-                #     break
                 if render:
                     renders.append(dig_outputs["rgb"].detach())
+            self.is_initialized = True
             return dig_outputs, loss, whole_pose_adj.data.clone()
 
         best_loss = float("inf")
@@ -419,6 +421,7 @@ class RigidGroupOptimizer:
                 lr_final=self.pose_lr_final, max_steps=niter
             )
         ).get_scheduler(self.optimizer, self.pose_lr)
+        roi_cam = self.get_ROI_cam(self.get_ROI()) if self.use_roi else self.init_c2o
         for i in range(niter):
             # renormalize rotation representation
             with torch.no_grad():
@@ -434,7 +437,7 @@ class RigidGroupOptimizer:
                     self.apply_to_model(
                         self.pose_deltas, self.centroids, self.group_labels
                     )
-                dig_outputs = self.dig_model.get_outputs(self.init_c2o)
+                dig_outputs = self.dig_model.get_outputs(deepcopy(roi_cam))
             if "dino" not in dig_outputs:
                 self.reset_transforms()
                 raise RuntimeError("Lost tracking")
@@ -499,7 +502,13 @@ class RigidGroupOptimizer:
             scheduler.step()
         # reset lr
         self.optimizer.param_groups[0]["lr"] = self.pose_lr
-        return dig_outputs
+        with torch.no_grad(), self.render_lock:
+            self.dig_model.eval()
+            self.apply_to_model(
+                    self.pose_deltas, self.centroids, self.group_labels
+                )
+            full_outputs = self.dig_model.get_outputs(deepcopy(self.init_c2o))
+        return {k:i.detach() for k,i in full_outputs.items()}
 
     def apply_to_model(self, pose_deltas, centroids, group_labels):
         """
@@ -582,17 +591,65 @@ class RigidGroupOptimizer:
         with torch.no_grad():
             self.dig_model.gauss_params["means"] = self.init_means.clone()
             self.dig_model.gauss_params["quats"] = self.init_quats.clone()
+    
+    def get_ROI(self, inflate = .15):
+        """
+        returns the bounding box of the object in the current frame
 
-    def set_frame(self, rgb_frame: torch.Tensor, depth: torch.Tensor = None):
+        returns: ymin, ymax, xmin, xmax
+        """
+        assert self.use_roi
+        # assert inflate < 1
+        with torch.no_grad():
+            with self.render_lock:
+                self.dig_model.eval()
+                self.apply_to_model(self.pose_deltas, self.centroids, self.group_labels)
+                object_mask = self.dig_model.get_outputs(self.init_c2o)["accumulation"] > 0.9
+            valids = torch.where(object_mask)
+            inflate_amnt = (inflate*(valids[0].max() - valids[0].min()).item(), inflate*(valids[1].max() - valids[1].min()).item())
+            candidate_roi = (valids[0].min().item() - inflate_amnt[0], inflate_amnt[0] + valids[0].max().item(), 
+                    valids[1].min().item() - inflate_amnt[1], inflate_amnt[1] + valids[1].max().item())
+            #clip ROI to image bounds
+            candidate_roi = (max(0,candidate_roi[0]),min(self.init_c2o.height-1,candidate_roi[1]),
+                            max(0,candidate_roi[2]),min(self.init_c2o.width-1,candidate_roi[3]))
+        return candidate_roi
+        
+    def get_ROI_cam(self, roi):
+        """
+        returns the intrinsics of the camera for the current ROI
+        """
+        assert self.use_roi
+        ymin, ymax, xmin, xmax = roi
+        newcam = deepcopy(self.init_c2o)
+        newcam.height = ymax - ymin
+        newcam.width = xmax - xmin
+        newcam.cx = self.init_c2o.cx - xmin
+        newcam.cy = self.init_c2o.cy - ymin
+        newcam.rescale_output_resolution(500.0/max(newcam.width,newcam.height))
+        return newcam
+    
+    def set_frame(self, rgb_frame: torch.Tensor, depth: Optional[torch.Tensor] = None):
         """
         Sets the rgb_frame to optimize the pose for
         rgb_frame: HxWxC tensor image
         init_c2o: initial camera to object transform (given whatever coordinates the self.dig_model is in)
         """
+        if self.use_roi and self.is_initialized:
+            ymin,ymax,xmin,xmax = self.get_ROI()
+            roi_cam = self.get_ROI_cam((ymin,ymax,xmin,xmax))
+            # ROI is determined inside the global camera, so we need to convert it to the right resolution
+            ymin,ymax = int((ymin/self.init_c2o.height)*(rgb_frame.shape[0]-1)),int((ymax/self.init_c2o.height)*(rgb_frame.shape[0]-1))
+            xmin,xmax = int((xmin/self.init_c2o.width)*(rgb_frame.shape[1]-1)),int((xmax/self.init_c2o.width)*(rgb_frame.shape[1]-1))
+            rgb_frame = rgb_frame[ymin:ymax,xmin:xmax]
+            if self.use_depth and depth is not None:
+                depth = depth[ymin:ymax,xmin:xmax]
+        else:
+            roi_cam = self.init_c2o
+
         with torch.no_grad():
             self.rgb_frame = resize(
                 rgb_frame.permute(2, 0, 1),
-                (self.init_c2o.height, self.init_c2o.width),
+                (roi_cam.height, roi_cam.width),
                 antialias=True,
             ).permute(1, 2, 0)
             self.frame_pca_feats = self.dino_loader.get_pca_feats(
@@ -600,17 +657,17 @@ class RigidGroupOptimizer:
             ).squeeze()
             self.frame_pca_feats = resize(
                 self.frame_pca_feats.permute(2, 0, 1),
-                (self.init_c2o.height, self.init_c2o.width),
+                (roi_cam.height, roi_cam.width),
                 antialias=True,
             ).permute(1, 2, 0)
             # HxWxC
             if self.use_depth:
                 if depth is None:
-                    depth = get_depth((self.rgb_frame * 255).to(torch.uint8))
+                    depth = get_depth((self.rgb_frame*255).to(torch.uint8))
                 self.frame_depth = (
                     resize(
                         depth.unsqueeze(0),
-                        (self.init_c2o.height, self.init_c2o.width),
+                        (roi_cam.height, roi_cam.width),
                         antialias=True,
                     )
                     .squeeze()
@@ -624,3 +681,4 @@ class RigidGroupOptimizer:
                     ).squeeze()
                     == 0.0
                 )
+        
