@@ -16,9 +16,9 @@ def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = floa
     con_weight = connectivity_weights[gid1,gid2]
     curdist = wp.length(cur_means[id1] - cur_means[id2])
     loss[tid] = wp.abs(curdist - dists[tid]) * con_weight
-
+    
 class ATAPLoss:
-    touch_radius: float = .002
+    touch_radius: float = .001
     N: int = 200
     loss_mult: float = .05
     def __init__(self, dig_model: DiGModel, group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float = 1.0):

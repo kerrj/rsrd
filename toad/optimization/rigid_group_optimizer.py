@@ -59,7 +59,7 @@ def depth_ranking_loss(rendered_depth, gt_depth):
     out_diff = rendered_depth[::2, :] - rendered_depth[1::2, :] + m
     differing_signs = torch.sign(dpt_diff) != torch.sign(out_diff)
     loss = out_diff[differing_signs] * torch.sign(out_diff[differing_signs])
-    med = loss.quantile(0.6)
+    med = loss.quantile(0.5)
     return loss[loss < med].mean()
 
 
@@ -118,13 +118,13 @@ def mnn_matcher(feat_a, feat_b):
 
 
 class RigidGroupOptimizer:
-    use_depth: bool = False
-    depth_ignore_threshold: float = 0.1  # in meters
+    use_depth: bool = True
+    depth_ignore_threshold: float = 0.05  # in meters
     use_atap: bool = True
     pose_lr: float = 0.005
-    pose_lr_final: float = 0.0005
+    pose_lr_final: float = 0.001
     mask_hands: bool = False
-    use_roi: bool = True
+    use_roi: bool = False
 
     init_p2o: torch.Tensor
     """From: part, To: object. in current world frame. Part frame is centered at part centroid, and object frame is centered at object centroid."""
@@ -165,7 +165,7 @@ class RigidGroupOptimizer:
             [1, 0, 0, 0], dtype=torch.float32, device="cuda"
         )
         self.pose_deltas = torch.nn.Parameter(self.pose_deltas)
-        k = 3
+        k = 13
         s = 0.3 * ((k - 1) * 0.5 - 1) + 0.8
         self.blur = kornia.filters.GaussianBlur2d((k, k), (s, s))
         # NOT USED RN
@@ -259,7 +259,7 @@ class RigidGroupOptimizer:
                         pix_loss = pix_loss[
                             valids & (pix_loss < self.depth_ignore_threshold**2)
                         ]
-                        loss = loss + 10*pix_loss.mean()
+                        loss = loss + pix_loss.mean()
                     else:
                         # This is ranking loss for monodepth (which is disparity)
                         disparity = 1.0 / dig_outputs["depth"]
@@ -463,7 +463,7 @@ class RigidGroupOptimizer:
                     pix_loss = pix_loss[
                         valids & (pix_loss < self.depth_ignore_threshold**2)
                     ]
-                    loss = loss + 10*pix_loss.mean()
+                    loss = loss + pix_loss.mean()
                 else:
                     # This is ranking loss for monodepth (which is disparity)
                     disparity = 1.0 / dig_outputs["depth"]
@@ -501,12 +501,13 @@ class RigidGroupOptimizer:
             scheduler.step()
         # reset lr
         self.optimizer.param_groups[0]["lr"] = self.pose_lr
-        with torch.no_grad(), self.render_lock:
-            self.dig_model.eval()
-            self.apply_to_model(
-                    self.pose_deltas, self.centroids, self.group_labels
-                )
-            full_outputs = self.dig_model.get_outputs(deepcopy(self.init_c2o))
+        with torch.no_grad():
+            with self.render_lock:
+                self.dig_model.eval()
+                self.apply_to_model(
+                        self.pose_deltas, self.centroids, self.group_labels
+                    )
+                full_outputs = self.dig_model.get_outputs(deepcopy(self.init_c2o))
         return {k:i.clone() for k,i in full_outputs.items()}
 
     def apply_to_model(self, pose_deltas, centroids, group_labels):
@@ -535,6 +536,7 @@ class RigidGroupOptimizer:
         self.dig_model.gauss_params["quats"] = new_quats
         self.dig_model.gauss_params["means"] = new_means
 
+    @torch.no_grad()
     def register_keyframe(self, lhands: List[trimesh.Trimesh], rhands: List[trimesh.Trimesh]):
         """
         Saves the current pose_deltas as a keyframe
@@ -552,7 +554,7 @@ class RigidGroupOptimizer:
         for i in range(len(self.group_masks)):
             partdeltas[i] = self.get_partdelta_transform(i)
         self.keyframes.append(partdeltas)
-
+    @torch.no_grad()
     def apply_keyframe(self, i):
         """
         Applies the ith keyframe to the pose_deltas
@@ -591,7 +593,7 @@ class RigidGroupOptimizer:
             self.dig_model.gauss_params["means"] = self.init_means.clone()
             self.dig_model.gauss_params["quats"] = self.init_quats.clone()
     
-    def get_ROI(self, inflate = .2):
+    def get_ROI(self, inflate = .15):
         """
         returns the bounding box of the object in the current frame
 
@@ -603,12 +605,13 @@ class RigidGroupOptimizer:
             with self.render_lock:
                 self.dig_model.eval()
                 self.apply_to_model(self.pose_deltas, self.centroids, self.group_labels)
-                object_mask = self.dig_model.get_outputs(self.init_c2o)["accumulation"] > 0.9
+                object_mask = self.dig_model.get_outputs(self.init_c2o)["accumulation"] > 0.7
             valids = torch.where(object_mask)
             inflate_amnt = (inflate*(valids[0].max() - valids[0].min()).item(), inflate*(valids[1].max() - valids[1].min()).item())
             candidate_roi = (valids[0].min().item() - inflate_amnt[0], inflate_amnt[0] + valids[0].max().item(), 
                     valids[1].min().item() - inflate_amnt[1], inflate_amnt[1] + valids[1].max().item())
             #clip ROI to image bounds
+            candidate_roi = (int(candidate_roi[0]),int(candidate_roi[1]),int(candidate_roi[2]),int(candidate_roi[3]))
             candidate_roi = (max(0,candidate_roi[0]),min(self.init_c2o.height-1,candidate_roi[1]),
                             max(0,candidate_roi[2]),min(self.init_c2o.width-1,candidate_roi[3]))
             candidate_roi = (int(candidate_roi[0]),int(candidate_roi[1]),int(candidate_roi[2]),int(candidate_roi[3]))
@@ -625,8 +628,8 @@ class RigidGroupOptimizer:
         newcam.width = torch.tensor(xmax - xmin,device='cuda').view(1,1).int()
         newcam.cx = torch.tensor(self.init_c2o.cx - xmin,device='cuda').view(1,1)
         newcam.cy = torch.tensor(self.init_c2o.cy - ymin,device='cuda').view(1,1)
-        newcam.rescale_output_resolution(500.0/max(newcam.width,newcam.height))
-        return newcam
+        newcam.rescale_output_resolution(500/max(newcam.width,newcam.height))
+        return deepcopy(newcam)
     
     def set_frame(self, rgb_frame: torch.Tensor, depth: Optional[torch.Tensor] = None):
         """
@@ -640,7 +643,7 @@ class RigidGroupOptimizer:
             # ROI is determined inside the global camera, so we need to convert it to the right resolution
             ymin,ymax = int((ymin/self.init_c2o.height)*(rgb_frame.shape[0]-1)),int((ymax/self.init_c2o.height)*(rgb_frame.shape[0]-1))
             xmin,xmax = int((xmin/self.init_c2o.width)*(rgb_frame.shape[1]-1)),int((xmax/self.init_c2o.width)*(rgb_frame.shape[1]-1))
-            rgb_frame = rgb_frame[ymin:ymax,xmin:xmax]
+            rgb_frame = rgb_frame[ymin:ymax,xmin:xmax].clone()
             if self.use_depth and depth is not None:
                 depth = depth[ymin:ymax,xmin:xmax]
         else:
@@ -663,7 +666,7 @@ class RigidGroupOptimizer:
             # HxWxC
             if self.use_depth:
                 if depth is None:
-                    depth = get_depth((self.rgb_frame*255).to(torch.uint8))
+                    depth = get_depth((rgb_frame*255).to(torch.uint8))
                 self.frame_depth = (
                     resize(
                         depth.unsqueeze(0),
@@ -681,4 +684,3 @@ class RigidGroupOptimizer:
                     ).squeeze()
                     == 0.0
                 )
-        
