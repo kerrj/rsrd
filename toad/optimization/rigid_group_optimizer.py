@@ -118,7 +118,7 @@ def mnn_matcher(feat_a, feat_b):
 
 
 class RigidGroupOptimizer:
-    use_depth: bool = True
+    use_depth: bool = False
     depth_ignore_threshold: float = 0.1  # in meters
     use_atap: bool = True
     pose_lr: float = 0.005
@@ -507,7 +507,7 @@ class RigidGroupOptimizer:
                     self.pose_deltas, self.centroids, self.group_labels
                 )
             full_outputs = self.dig_model.get_outputs(deepcopy(self.init_c2o))
-        return {k:i.detach() for k,i in full_outputs.items()}
+        return {k:i.clone() for k,i in full_outputs.items()}
 
     def apply_to_model(self, pose_deltas, centroids, group_labels):
         """
@@ -591,7 +591,7 @@ class RigidGroupOptimizer:
             self.dig_model.gauss_params["means"] = self.init_means.clone()
             self.dig_model.gauss_params["quats"] = self.init_quats.clone()
     
-    def get_ROI(self, inflate = .15):
+    def get_ROI(self, inflate = .2):
         """
         returns the bounding box of the object in the current frame
 
@@ -611,6 +611,7 @@ class RigidGroupOptimizer:
             #clip ROI to image bounds
             candidate_roi = (max(0,candidate_roi[0]),min(self.init_c2o.height-1,candidate_roi[1]),
                             max(0,candidate_roi[2]),min(self.init_c2o.width-1,candidate_roi[3]))
+            candidate_roi = (int(candidate_roi[0]),int(candidate_roi[1]),int(candidate_roi[2]),int(candidate_roi[3]))
         return candidate_roi
         
     def get_ROI_cam(self, roi):
@@ -620,10 +621,10 @@ class RigidGroupOptimizer:
         assert self.use_roi
         ymin, ymax, xmin, xmax = roi
         newcam = deepcopy(self.init_c2o)
-        newcam.height = ymax - ymin
-        newcam.width = xmax - xmin
-        newcam.cx = self.init_c2o.cx - xmin
-        newcam.cy = self.init_c2o.cy - ymin
+        newcam.height = torch.tensor(ymax - ymin,device='cuda').view(1,1).int()
+        newcam.width = torch.tensor(xmax - xmin,device='cuda').view(1,1).int()
+        newcam.cx = torch.tensor(self.init_c2o.cx - xmin,device='cuda').view(1,1)
+        newcam.cy = torch.tensor(self.init_c2o.cy - ymin,device='cuda').view(1,1)
         newcam.rescale_output_resolution(500.0/max(newcam.width,newcam.height))
         return newcam
     
