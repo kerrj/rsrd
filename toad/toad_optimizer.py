@@ -120,6 +120,16 @@ class ToadOptimizer:
             render_lock=self.viewer_ns.train_lock,
         )
 
+        # Initialize the object -- remember that ToadObject works in world scale,
+        # since grasps + etc are in world scale.
+        start = time.time()
+        self.toad_object = GraspableToadObject.from_points_and_clusters(
+            self.optimizer.init_means.detach().cpu().numpy(),
+            self.optimizer.group_labels.detach().cpu().numpy(),
+            scene_scale=self.optimizer.dataset_scale,
+        )
+        print(f"Time taken for init (toad_object): {time.time() - start:.2f} s")
+
         self.initialized = False
 
     def _setup_crops_and_groups(self) -> Tuple[torch.Tensor, List[torch.Tensor]]:
@@ -147,20 +157,9 @@ class ToadOptimizer:
 
     def init_obj_pose(self):
         """Initialize the object pose, and render the object pose optimization process.
-        Only here is toad_object initialized (since it requires the updated initial means and group labels).
         Also updates `initialized` to `True`."""
-        start = time.time()
-        # Initialize the object -- remember that ToadObject works in world scale,
-        # since grasps + etc are in world scale.
-        start = time.time()
-        self.toad_object = GraspableToadObject.from_points_and_clusters(
-            self.optimizer.init_means.detach().cpu().numpy(),
-            self.optimizer.group_labels.detach().cpu().numpy(),
-            scene_scale=self.optimizer.dataset_scale,
-        )
-        print(f"Time taken for init (toad_object): {time.time() - start:.2f} s")
-
         # retval only matters for visualization
+        start = time.time()
         xs, ys, outputs, renders = self.optimizer.initialize_obj_pose(render=True)
         print(f"Time taken for init (pose opt): {time.time() - start:.2f} s")
 
