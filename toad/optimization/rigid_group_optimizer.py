@@ -28,18 +28,6 @@ from toad.optimization.atap_loss import ATAPLoss
 from toad.utils import *
 import viser.transforms as vtf
 import trimesh
-def getBack(var_grad_fn):
-    print(var_grad_fn)
-    for n in var_grad_fn.next_functions:
-        if n[0]:
-            try:
-                tensor = getattr(n[0], 'variable')
-                print(n[0])
-                print('Tensor with grad found:', tensor)
-                print(' - gradient:', tensor.grad)
-                print()
-            except AttributeError as e:
-                getBack(n[0])
 
 def quatmul(q0: torch.Tensor, q1: torch.Tensor):
     w0, x0, y0, z0 = torch.unbind(q0, dim=-1)
@@ -131,9 +119,9 @@ def mnn_matcher(feat_a, feat_b):
 class RigidGroupOptimizer:
     use_depth: bool = True
     depth_ignore_threshold: float = 0.05  # in meters
-    use_atap: bool = True
+    use_atap: bool = False
     pose_lr: float = 0.005
-    pose_lr_final: float = 0.001
+    pose_lr_final: float = 0.0005
     mask_hands: bool = False
     use_roi: bool = True
 
@@ -460,11 +448,11 @@ class RigidGroupOptimizer:
                 .permute(1, 2, 0)
             )
             if self.mask_hands:
-                pix_loss = (self.frame_pca_feats - dino_feats)[self.hand_mask]
+                pix_loss = (self.frame_pca_feats - dino_feats)[self.hand_mask].norm(dim=-1)
             else:
-                pix_loss = self.frame_pca_feats - dino_feats
+                mse_loss = (self.frame_pca_feats - dino_feats).norm(dim=-1)
             # THIS IS BAD WE NEED TO FIX THIS (because resizing makes the image very slightly misaligned)
-            loss = pix_loss.norm(dim=-1).mean()
+            loss = mse_loss.mean()
             if use_depth and self.use_depth:
                 if metric_depth:
                     physical_depth = dig_outputs["depth"] / self.dataset_scale
@@ -502,8 +490,6 @@ class RigidGroupOptimizer:
                     atap_loss = self.atap(weights)
                 loss = loss + atap_loss
             loss.backward()
-            # getBack(loss.grad_fn)
-            # input()
             tape.backward()
             self.optimizer.step()
             # self.weights_optimizer.step()
@@ -602,7 +588,7 @@ class RigidGroupOptimizer:
             self.dig_model.gauss_params["means"] = self.init_means.detach().clone()
             self.dig_model.gauss_params["quats"] = self.init_quats.detach().clone()
     
-    def get_ROI(self, inflate = .15):
+    def get_ROI(self, inflate = .2):
         """
         returns the bounding box of the object in the current frame
 
