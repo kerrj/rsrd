@@ -105,125 +105,146 @@ class TorchUrdf:
         batch_axes = cfg.shape[:-1]
         assert cfg.shape == (*batch_axes, self.num_joints)
 
-        device = self.Ts_parent_joint.device
-        dtype = self.Ts_parent_joint.dtype
-
         list_Ts_world_joint = list[Tensor]()
+        Ts_joint_child = SE3.exp(
+            torch.broadcast_to(self.joint_twists, (*batch_axes, self.num_joints, 6))
+            * cfg[..., None]
+        ).as_matrix()
+        assert Ts_joint_child.shape == (*batch_axes, self.num_joints, 4, 4)
         for i in range(self.num_joints):
             if self.parent_indices[i] == -1:
-                T_world_parent = torch.broadcast_to(
-                    torch.eye(4, device=device, dtype=dtype), (*batch_axes, 4, 4)
+                list_Ts_world_joint.append(
+                    torch.einsum(
+                        "jk,...kl->...jl",
+                        self.Ts_parent_joint[i],
+                        Ts_joint_child[..., i, :, :],
+                    )
                 )
             else:
                 T_world_parent = list_Ts_world_joint[self.parent_indices[i]]
-            list_Ts_world_joint.append(
-                torch.einsum(
-                    "...ij,jk,...kl->...il",
-                    T_world_parent,
-                    self.Ts_parent_joint[i],
-                    SE3.exp(
-                        torch.broadcast_to(self.joint_twists[i], (*batch_axes, 6))
-                        * cfg[..., i, None]
-                    ).as_matrix(),
+                list_Ts_world_joint.append(
+                    torch.einsum(
+                        "...ij,jk,...kl->...il",
+                        T_world_parent,
+                        self.Ts_parent_joint[i],
+                        Ts_joint_child[..., i, :, :],
+                    )
                 )
-            )
 
         Ts_world_joint = torch.stack(list_Ts_world_joint, dim=-3)
         assert Ts_world_joint.shape == (*batch_axes, self.num_joints, 4, 4)
         return Ts_world_joint
 
 
-def smooth_trajectory(
-    torch_urdf: TorchUrdf,
-    traj: Float[Tensor, "timesteps num_joints"],
-    hold_indices: tuple[int, ...],
+def motion_plan_yumi(
+    yumi_urdf: TorchUrdf,
+    pose_target_from_joint_idx: dict[int, Float[Tensor, "timesteps 4 4"]],
     *,
+    lbfgs_iterations: int = 40,
     smooth_weight: float = 5.0,
     rest_prior_weight: float = 0.001,
-    hold_pos_weight: float = 50.0,
-    hold_ori_weight: float = 0.2,
+    pos_weight: float = 50.0,
+    ori_weight: float = 0.2,
     limits_weight: float = 500.0,
     limits_pad: float = 0.05,
-    iterations: int = 20,
 ) -> Float[Tensor, "timesteps num_joints"]:
     """Smooth a trajectory, while holding the output frames of some set of
     joints fixed."""
-    traj = traj.detach().clone().requires_grad_(False)
-    (timesteps, num_joints) = traj.shape
-    assert num_joints == torch_urdf.num_joints
+    proto = next(iter(pose_target_from_joint_idx.values()))
+    timesteps = proto.shape[0]
+    device = proto.device
+    dtype = proto.dtype
+    del proto
 
     # Parameters to optimize.
-    # We're going to hold the first and final joint positions the same.
-    # offsets = traj.new_zeros((timesteps - 2, num_joints)).requires_grad_(True)
-    updated_traj = traj.new_zeros((timesteps, num_joints)).requires_grad_(True)
+    num_joints = yumi_urdf.num_joints
+    recovered_traj = torch.zeros(
+        (timesteps, num_joints), device=device, dtype=dtype
+    ).requires_grad_(True)
+    with torch.no_grad():
+        recovered_traj += torch.tensor(
+            [
+                1.21442839,
+                -1.03205606,
+                -1.10072738,
+                0.2987352,
+                -1.85257716,
+                1.25363652,
+                -2.42181893,
+                -1.24839656,
+                -1.09802876,
+                1.06634394,
+                0.31386161,
+                1.90125141,
+                1.3205139,
+                2.43563939,
+                0.0,
+                0.0,
+            ],
+            device=device,
+            dtype=dtype,
+        )
+
     optim = torch.optim.LBFGS(
-        [updated_traj],
-        history_size=20,
+        [recovered_traj],
         max_iter=10,
         tolerance_grad=1e-4,
         tolerance_change=1e-5,
         line_search_fn="strong_wolfe",
     )
 
-    # Original forward kinematics. We'll use this to hold some joint poses still.
-    orig_Ts_world_joint = torch_urdf.forward_kinematics(traj).detach()
-    assert orig_Ts_world_joint.shape == (timesteps, torch_urdf.num_joints, 4, 4)
+    loss_terms = dict[str, Float[Tensor, "num_seeds"]]()
 
     def closure():
         optim.zero_grad(set_to_none=True)
-        assert updated_traj.shape == (timesteps, num_joints)
-        Ts_world_joint = torch_urdf.forward_kinematics(updated_traj)
+        assert recovered_traj.shape == (timesteps, num_joints)
+        Ts_world_joint = yumi_urdf.forward_kinematics(recovered_traj)
 
-        loss_terms = dict[str, Tensor]()
+        nonlocal loss_terms
+        loss_terms = dict[str, Float[Tensor, "num_seeds"]]()
 
         # Smoothness term in joint space.
         loss_terms["smooth"] = smooth_weight * torch.sum(
-            (updated_traj[:-1, :] - updated_traj[1:, :]) ** 2
+            (recovered_traj[:-1, :] - recovered_traj[1:, :]) ** 2
         )
-        loss_terms["prior"] = rest_prior_weight * torch.sum(updated_traj**2)
+        loss_terms["prior"] = rest_prior_weight * torch.sum(recovered_traj**2)
         loss_terms["lim_low"] = limits_weight * torch.sum(
             torch.minimum(
-                torch.zeros(1),
-                updated_traj - (torch_urdf.limits_lower - limits_pad),
+                recovered_traj.new_zeros(1),
+                recovered_traj - (yumi_urdf.limits_lower - limits_pad)[None, :],
             )
             ** 2
         )
         loss_terms["lim_up"] = limits_weight * torch.sum(
             torch.maximum(
-                torch.zeros(1),
-                updated_traj - (torch_urdf.limits_upper + limits_pad),
+                recovered_traj.new_zeros(1),
+                recovered_traj - (yumi_urdf.limits_upper + limits_pad)[None, :],
             )
             ** 2
         )
 
-        # Hold some set of joints in place.
-        for hold_joint in hold_indices:
-            loss_terms[f"pos_{hold_joint}"] = hold_pos_weight * torch.sum(
-                (
-                    orig_Ts_world_joint[:, hold_joint, :3, 3]
-                    - Ts_world_joint[:, hold_joint, :3, 3]
-                )
-                ** 2
+        # Pose target losses.
+        for joint_idx, target_pose in pose_target_from_joint_idx.items():
+            loss_terms[f"pos_{joint_idx}"] = pos_weight * torch.sum(
+                (target_pose[:, :3, 3] - Ts_world_joint[:, joint_idx, :3, 3]) ** 2
             )
-            loss_terms[f"ori_{hold_joint}"] = hold_ori_weight * torch.sum(
-                (
-                    orig_Ts_world_joint[:, hold_joint, :3, :3]
-                    - Ts_world_joint[:, hold_joint, :3, :3]
-                )
-                ** 2
+            loss_terms[f"ori_{joint_idx}"] = ori_weight * torch.sum(
+                (target_pose[:, :3, :3] - Ts_world_joint[:, joint_idx, :3, :3]) ** 2
             )
 
-        pbar.set_description(
-            " ".join(f"{k}: {v.item():.5f}" for k, v in loss_terms.items())
-        )
-        loss = functools.reduce(torch.add, loss_terms.values())
+        loss = functools.reduce(torch.add, map(torch.sum, loss_terms.values()))
+        assert loss.shape == ()
+        pbar.set_description(str(loss.item()))
         loss.backward()
         return loss
 
-    for _ in (pbar := tqdm(range(iterations))):
+    for _ in (pbar := tqdm(range(lbfgs_iterations))):
         optim.step(closure)  # type: ignore
 
-    return updated_traj.detach()
+        for label, loss in loss_terms.items():
+            print(f"{label.ljust(20)} {loss.numpy(force=True)}")
+
+    return recovered_traj.detach()
 
 
 def main(
@@ -237,10 +258,29 @@ def main(
 
     # Load the trajectory.
     raw_traj = np.load(traj_npy)
-    traj = np.zeros((raw_traj.shape[0], 16))
-    traj[:, :7] = raw_traj[:, 7:14]
-    traj[:, 7:14] = raw_traj[:, :7]
+    traj = np.zeros((raw_traj.shape[0], 16), dtype=np.float32)
+    traj[:, :7] = torch.from_numpy(raw_traj[:, 7:14])
+    traj[:, 7:14] = torch.from_numpy(raw_traj[:, :7])
     del raw_traj
+    timesteps = traj.shape[0]
+
+    # Forward kinematics for original trajectory.
+    orig_Ts_world_joint = torch_urdf.forward_kinematics(
+        torch.from_numpy(traj).to(device)
+    )
+    assert orig_Ts_world_joint.shape == (traj.shape[0], torch_urdf.num_joints, 4, 4)
+
+    # Run motion planning optimization.
+    opt_traj = motion_plan_yumi(
+        torch_urdf,
+        pose_target_from_joint_idx={
+            # These poses should have shape (timesteps, 4, 4).
+            6: orig_Ts_world_joint[:, 6, :, :],
+            13: orig_Ts_world_joint[:, 13, :, :],
+        },
+    )
+    assert opt_traj.shape == (timesteps, torch_urdf.num_joints)
+    opt_traj = opt_traj.numpy(force=True)
 
     # Visualize two robots: original and smoothed.
     server = viser.ViserServer()
@@ -251,15 +291,7 @@ def main(
         server, yourdf, root_node_name="/urdf_smoothed"
     )
 
-    # Smooth the trajectory.
-    smoothed_traj = smooth_trajectory(
-        torch_urdf,
-        torch.from_numpy(traj.astype(np.float32)).to(device),
-        hold_indices=(6, 13),
-    ).numpy(force=True)
-
     # Visualize!
-    timesteps = traj.shape[0]
     slider = server.gui.add_slider(
         "Timestep", min=0, max=timesteps - 1, step=1, initial_value=0
     )
@@ -267,7 +299,7 @@ def main(
     @slider.on_update
     def _(_) -> None:
         urdf_orig.update_cfg(traj[slider.value])
-        urdf_smoothed.update_cfg(smoothed_traj[slider.value])
+        urdf_smoothed.update_cfg(opt_traj[slider.value])
 
     playing = server.gui.add_checkbox("Playing", initial_value=True)
 
