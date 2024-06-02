@@ -16,24 +16,77 @@ robot_cfg:
                           "gripper_r_base","gripper_r_finger_r","gripper_r_finger_l"]
     self_collision_ignore:
       {
-        "gripper_l_base": ["gripper_l_finger_r", "gripper_l_finger_l", "yumi_link_7_l"],
-        "gripper_r_base": ["gripper_r_finger_r", "gripper_r_finger_l", "yumi_link_7_r"],
-        "gripper_l_finger_r": ["gripper_l_finger_l"],
-        "gripper_r_finger_r": ["gripper_r_finger_l"],
-        "yumi_link_1_l": ["yumi_link_2_l"],
-        "yumi_link_2_l": ["yumi_link_3_l"],
-        "yumi_link_3_l": ["yumi_link_4_l"],
-        "yumi_link_4_l": ["yumi_link_5_l"],
-        "yumi_link_5_l": ["yumi_link_6_l", "yumi_link_7_l"],
-        "yumi_link_6_l": ["yumi_link_7_l","gripper_l_base"],
+        # "gripper_l_base": ["gripper_l_finger_r", "gripper_l_finger_l", "yumi_link_7_l"],
+        # "gripper_r_base": ["gripper_r_finger_r", "gripper_r_finger_l", "yumi_link_7_r"],
+        # "gripper_l_finger_r": ["gripper_l_finger_l"],
+        # "gripper_r_finger_r": ["gripper_r_finger_l"],
+        # "yumi_link_1_l": ["yumi_link_2_l"],
+        # "yumi_link_2_l": ["yumi_link_3_l"],
+        # "yumi_link_3_l": ["yumi_link_4_l"],
+        # "yumi_link_4_l": ["yumi_link_5_l"],
+        # "yumi_link_5_l": ["yumi_link_6_l", "yumi_link_7_l"],
+        # "yumi_link_6_l": ["yumi_link_7_l","gripper_l_base"],
         
-        "yumi_link_1_r": ["yumi_link_2_r"],
-        "yumi_link_2_r": ["yumi_link_3_r"],
-        "yumi_link_3_r": ["yumi_link_4_r"],
-        "yumi_link_4_r": ["yumi_link_5_r"],
-        "yumi_link_5_r": ["yumi_link_6_r", "yumi_link_7_r"],
-        "yumi_link_6_r": ["yumi_link_7_r","gripper_r_base"],
-        "base_link": ["yumi_link_1_l","yumi_link_1_r"]
+        # "yumi_link_1_r": ["yumi_link_2_r"],
+        # "yumi_link_2_r": ["yumi_link_3_r"],
+        # "yumi_link_3_r": ["yumi_link_4_r"],
+        # "yumi_link_4_r": ["yumi_link_5_r"],
+        # "yumi_link_5_r": ["yumi_link_6_r", "yumi_link_7_r"],
+        # "yumi_link_6_r": ["yumi_link_7_r","gripper_r_base"],
+        # "base_link": ["yumi_link_1_l","yumi_link_1_r"]
+
+        "base_link": [
+          "yumi_link_1_l", "yumi_link_1_r",
+          "yumi_link_2_l", "yumi_link_2_r",
+          "yumi_link_3_l", "yumi_link_3_r",
+          "yumi_link_4_l", "yumi_link_4_r",
+          "yumi_link_5_l", "yumi_link_5_r",
+        ],
+
+        # Only the collision that we want to track, is (7, 6, gripper) with (yumi_link_1, and yumi_link_2).
+        "yumi_link_1_l": [
+          "yumi_link_2_l", "yumi_link_3_l", "yumi_link_4_l", "yumi_link_5_l",
+          "yumi_link_1_r",  # cannot hit the other arm.
+        ],
+        "yumi_link_2_l": [
+          "yumi_link_3_l", "yumi_link_4_l", "yumi_link_5_l",
+          "yumi_link_1_r",  # cannot hit the other arm.
+        ],
+        # 3, hits nothing.
+        "yumi_link_3_l": ["yumi_link_4_l", "yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # 4, also hits nothing.
+        "yumi_link_4_l": ["yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # 5, also hits nothing.
+        "yumi_link_5_l": ["yumi_link_6_l", "yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # 6, ignores 7, gripper base, and fingers.
+        "yumi_link_6_l": ["yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # 7, ignores gripper base, and fingers.
+        "yumi_link_7_l": ["gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # Gripper should ignore finger.
+        "gripper_l_base": ["gripper_l_finger_r", "gripper_l_finger_l"],
+        # Fingers should ignore each other.
+        "gripper_l_finger_r": ["gripper_l_finger_l"],
+
+        # Only the collision that we want to track, is (7, 6, gripper) with (yumi_link_1, and yumi_link_2).
+        "yumi_link_1_r": ["yumi_link_2_r", "yumi_link_3_r", "yumi_link_4_r", "yumi_link_5_r"],
+        "yumi_link_2_r": [
+          "yumi_link_3_r", "yumi_link_4_r", "yumi_link_5_r",
+          "yumi_link_1_l",  # cannot hit the other arm.
+        ],
+        # 3, hits nothing.
+        "yumi_link_3_r": ["yumi_link_4_r", "yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base", "gripper_r_finger_l", "gripper_r_finger_r"],
+        # 4, also hits nothing.
+        "yumi_link_4_r": ["yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base", "gripper_r_finger_l", "gripper_r_finger_r"],
+        # 5, also hits nothing.
+        "yumi_link_5_r": ["yumi_link_6_r", "yumi_link_7_r", "gripper_r_base", "gripper_r_finger_l", "gripper_r_finger_r"],
+        # 6, ignores 7, gripper base, and fingers.
+        "yumi_link_6_r": ["yumi_link_7_r", "gripper_r_base", "gripper_r_finger_r", "gripper_r_finger_l"],
+        # 7, ignores gripper base, and fingers.
+        "yumi_link_7_r": ["gripper_r_base", "gripper_r_finger_r", "gripper_r_finger_l"],
+        # Gripper should ignore finger.
+        "gripper_r_base": ["gripper_r_finger_r", "gripper_r_finger_l"],
+        # Fingers should ignore each other.
+        "gripper_r_finger_r": ["gripper_r_finger_l"],
       }
     collision_spheres:
       yumi_link_1_l:
