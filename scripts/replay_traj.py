@@ -59,10 +59,10 @@ def create_zed_and_toad(
 
 
 def replay_traj(
-    config_path: Path = Path("outputs/nerfgun/dig/2024-05-30_210410/config.yml"),
-    keyframe_path: Path = Path("renders/nerfgun/keyframes.pt")
-    # config_path: Path = Path("outputs/mallet/dig/2024-05-27_180206/config.yml"),
-    # keyframe_path: Path = Path("renders/mallet/keyframes.pt")
+    # config_path: Path = Path("outputs/nerfgun/dig/2024-05-30_210410/config.yml"),
+    # keyframe_path: Path = Path("renders/nerfgun/keyframes.pt")
+    config_path: Path = Path("outputs/mallet/dig/2024-05-27_180206/config.yml"),
+    keyframe_path: Path = Path("renders/mallet/keyframes.pt")
 ):
     """Quick interactive demo for object traj following.
 
@@ -75,7 +75,7 @@ def replay_traj(
 
     robot = YumiRobot(
         server,
-        batch_size=120,
+        batch_size=240,
     )
 
     zed, camera_frame, toad_opt = create_zed_and_toad(
@@ -222,39 +222,83 @@ def replay_traj(
         mesh_list = toad_opt.toad_object.to_world_config(poses_wxyz_xyz=poses_wxyz_xyz)
         robot.plan.update_world_objects(mesh_list)
 
+        # Find the anchor grasp pose, if it exists.
+        best_left_anchor_idx, best_right_anchor_idx = None, None
+        if anchor_handle.value != -1:
+            grasps = toad_opt.toad_object.grasps[anchor_handle.value]  # [N_grasps, 7]
+            grasps_gripper = toad_opt.toad_object.to_gripper_frame(
+                grasps, robot.tooltip_to_gripper
+            )
+            grasp_cand_list = poses_part2world[anchor_handle.value].multiply(grasps_gripper)
+            goal_wxyz_xyz = torch.Tensor(grasp_cand_list.wxyz_xyz)
+
+            anchor_traj, anchor_success = robot.plan.gen_motion_from_goal_either(
+                goal_wxyz_xyz=goal_wxyz_xyz,
+                initial_js=robot.plan.home_pos,
+            )
+            if anchor_success is None:
+                print("Failed to approach grasp for object (anchor).")
+                button_handle.disabled = False
+                return
+
+            assert isinstance(anchor_traj, torch.Tensor) and isinstance(anchor_success, torch.Tensor)
+
+            anchor_traj = anchor_traj.cpu()
+            anchor_success = anchor_success.cpu()
+
+            left_anchor_traj = anchor_traj[len(anchor_success) // 2:]
+            left_anchor_success = anchor_success[len(anchor_success) // 2:]
+            if left_anchor_success.any():
+                best_left_anchor_idx = torch.argmax((
+                    robot.plan.get_left_joints(left_anchor_traj[left_anchor_success][:, -1, :]).cpu()
+                    - robot.plan.get_left_joints(robot.plan.home_pos).cpu()
+                ).norm(dim=-1))
+                anchor_pose_l = goal_wxyz_xyz[left_anchor_success][best_left_anchor_idx].flatten()
+            else:
+                anchor_pose_l = None
+
+            right_anchor_traj = anchor_traj[:len(anchor_success) // 2]
+            right_anchor_success = anchor_success[:len(anchor_success) // 2]
+            if right_anchor_success.any():
+                best_right_anchor_idx = torch.argmax((
+                    robot.plan.get_right_joints(right_anchor_traj[right_anchor_success][:, -1, :]).cpu()
+                    - robot.plan.get_right_joints(robot.plan.home_pos).cpu()
+                ).norm(dim=-1))
+                anchor_pose_r = goal_wxyz_xyz[right_anchor_success][best_right_anchor_idx].flatten()
+            else:
+                anchor_pose_r = None
+
+        else:
+            anchor_pose_l = None
+            anchor_pose_r = None
+
+        if anchor_pose_l is None:
+            anchor_pose_l =torch.Tensor([0, 1, 0, 0, 0.4, 0.2, 0.5])
+        if anchor_pose_r is None:
+            anchor_pose_r =torch.Tensor([0, 1, 0, 0, 0.4, -0.2, 0.5])
+
+        assert len(anchor_pose_l.shape) == 1 and anchor_pose_l.shape[0] == 7
+        assert len(anchor_pose_r.shape) == 1 and anchor_pose_r.shape[0] == 7
+
         # Get grasps in world frame.
         grasps = toad_opt.toad_object.grasps[part_handle.value]  # [N_grasps, 7]
         grasps_gripper = toad_opt.toad_object.to_gripper_frame(
             grasps, robot.tooltip_to_gripper
         )
         grasp_cand_list = poses_part2world[part_handle.value].multiply(grasps_gripper)
+        goal_wxyz_xyz = torch.Tensor(grasp_cand_list.wxyz_xyz).float().cuda()
 
-        # Find the anchor grasp pose, if it exists.
-        # ...... this is not correct!
-        if anchor_handle.value != -1:
-            anchor_pose_l = anchor_pose_r = torch.from_numpy(
-                poses_part2world[anchor_handle.value].wxyz_xyz
-            ).flatten()
-        else:
-            anchor_pose_l = torch.Tensor([[0, 1, 0, 0, 0.4, 0.2, 0.5]])
-            anchor_pose_r = torch.Tensor([[0, 1, 0, 0, 0.4, -0.2, 0.5]])
+        anchor_pose_l = anchor_pose_l.expand(grasp_cand_list.wxyz_xyz.shape[0], -1).float().cuda()
+        anchor_pose_r = anchor_pose_r.expand(grasp_cand_list.wxyz_xyz.shape[0], -1).float().cuda()
 
-        goal_l_wxyz_xyz = torch.cat([
-            torch.Tensor(grasp_cand_list.wxyz_xyz),
-            anchor_pose_l.expand(grasp_cand_list.wxyz_xyz.shape[0], 7)
-        ])
-        goal_r_wxyz_xyz = torch.cat([
-            anchor_pose_r.expand(grasp_cand_list.wxyz_xyz.shape[0], 7),
-            torch.Tensor(grasp_cand_list.wxyz_xyz),
-        ])
-
-        approach_traj, approach_success = robot.plan.gen_motion_from_goal(
-            goal_l_wxyz_xyz=goal_l_wxyz_xyz,
-            goal_r_wxyz_xyz=goal_r_wxyz_xyz,
-            initial_js=robot.plan.home_pos,
+        approach_traj, approach_success = robot.plan.gen_motion_from_goal_either(
+            goal_wxyz_xyz=goal_wxyz_xyz,
+            anchor_l_wxyz_xyz=anchor_pose_l,
+            anchor_r_wxyz_xyz=anchor_pose_r,
+            initial_js=robot.plan.home_pos.cuda(),
         )
-        if approach_traj is None:
-            print("Failed to approach grasp for object.")
+        if approach_traj is None or (isinstance(approach_success, torch.Tensor) and not approach_success.any()):
+            print("Failed to reach grasp for object.")
             button_handle.disabled = False
             return
         assert isinstance(approach_traj, torch.Tensor) and isinstance(approach_success, torch.Tensor)
@@ -270,14 +314,21 @@ def replay_traj(
                 .wxyz_xyz
             ).unsqueeze(1)  # [num_grasps, 7] -> [num_grasps, 1, 7]
             for keyframe_idx in range(len(toad_opt.optimizer.keyframes))
-        ], dim=1) # [num_grasps, num_keyframes, 7]
+        ], dim=1).float().cuda() # [num_grasps, num_keyframes, 7]
+
+        assert (
+            anchor_pose_l.shape == anchor_pose_r.shape
+            and len(anchor_pose_l.shape) == 2
+            and anchor_pose_l.shape[0] == grasp_cand_list.wxyz_xyz.shape[0]
+            and anchor_pose_l.shape[1] == 7
+        )
 
         path_l_wxyz_xyz = torch.cat([
             grasp_path_wxyz_xyz,
-            anchor_pose_l.expand(grasp_cand_list.wxyz_xyz.shape[0], len(toad_opt.optimizer.keyframes), 7)
+            anchor_pose_l.unsqueeze(1).expand(-1, len(toad_opt.optimizer.keyframes), -1),
         ], dim=0)
         path_r_wxyz_xyz = torch.cat([
-            anchor_pose_r.expand(grasp_cand_list.wxyz_xyz.shape[0], len(toad_opt.optimizer.keyframes), 7),
+            anchor_pose_r.unsqueeze(1).expand(-1, len(toad_opt.optimizer.keyframes), -1),
             grasp_path_wxyz_xyz
         ], dim=0)
 
@@ -291,28 +342,36 @@ def replay_traj(
         path_l_wxyz_xyz = path_l_wxyz_xyz[:, ::waypoint_subsample, :]
         path_r_wxyz_xyz = path_r_wxyz_xyz[:, ::waypoint_subsample, :]
 
-        waypoint_traj, waypoint_success = robot.plan.gen_motion_from_ik_chain(
-            path_l_wxyz_xyz=path_l_wxyz_xyz,
-            path_r_wxyz_xyz=path_r_wxyz_xyz,
-            initial_js=approach_traj[:, -1, :]
-        )
-        if waypoint_traj is None:
-            print("Following the object part waypoints failed.")
-            button_handle.disabled = False
-            return
+        # waypoint_traj, waypoint_success = robot.plan.gen_motion_from_ik_chain(
+        #     path_l_wxyz_xyz=path_l_wxyz_xyz,
+        #     path_r_wxyz_xyz=path_r_wxyz_xyz,
+        #     initial_js=approach_traj[:, -1, :]
+        # )
+        # if waypoint_traj is None:
+        #     print("Following the object part waypoints failed.")
+        #     button_handle.disabled = False
+        #     return
 
-        assert isinstance(waypoint_traj, torch.Tensor) and isinstance(waypoint_success, torch.Tensor)
-        waypoint_success = waypoint_success.all(dim=1)  # [batch, time] -> [batch,]
+        # assert isinstance(waypoint_traj, torch.Tensor) and isinstance(waypoint_success, torch.Tensor)
+        # waypoint_success = waypoint_success.all(dim=1)  # [batch, time] -> [batch,]
 
-        traj = torch.cat([approach_traj, waypoint_traj], dim=1)  # [batch, time, dof]
-        success = approach_success & waypoint_success  # [batch,]
+        # traj = torch.cat([approach_traj, waypoint_traj], dim=1)  # [batch, time, dof]
+        # success = approach_success & waypoint_success  # [batch,]
 
-        if not success.any():
-            print("No successful trajectory found.")
-            button_handle.disabled = False
-            return
+        # if not success.any():
+        #     print("No successful trajectory found.")
+        #     button_handle.disabled = False
+        #     return
 
-        traj = traj[success]
+        # traj = traj[success]
+
+        waypoint_traj = robot.plan_jax.plan_from_waypoints(
+            left_poses=path_l_wxyz_xyz[approach_success].cpu(),
+            right_poses=path_r_wxyz_xyz[approach_success].cpu(),
+        ).cuda()
+
+        traj = torch.cat([approach_traj[approach_success], waypoint_traj], dim=1)  # [batch, time, dof]
+
         assert len(traj.shape) == 3, "Should be [batch, time, dof]."
 
         if traj_handle is not None:
@@ -348,7 +407,6 @@ def replay_traj(
             print("No trajectory handle.")
             return
         np.save("trajectory.npy", traj[traj_handle.value].cpu().numpy())
-
 
     while True:
         time.sleep(1)

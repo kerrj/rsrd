@@ -102,6 +102,17 @@ class ToadObject:
         return toad_obj
 
     @staticmethod
+    def from_mesh(mesh: trimesh.Trimesh) -> ToadObject:
+        points = mesh.vertices
+        clusters = np.zeros(len(points))
+        return ToadObject(
+            points=torch.tensor(points),
+            clusters=torch.tensor(clusters),
+            _meshes=[mesh],
+            scene_scale=1.0,
+        )
+
+    @staticmethod
     def _points_to_mesh(vertices: np.ndarray) -> trimesh.Trimesh:
         """Converts a point cloud to a mesh, using alpha hulls and smoothing."""
         points = o3d.geometry.PointCloud()
@@ -166,7 +177,7 @@ class ToadObject:
 @dataclasses.dataclass(frozen=True)
 class GraspableToadObject(ToadObject):
     grasps: List[torch.Tensor]
-    """List of grasps, of length N_clusters. Each element is a tensor of shape (N_grasps, 7), for grasp center and axis (quat)."""
+    """List of grasps, of length N_clusters. Each element is a tensor of shape (N_grasps, 7), for grasp center and axis (quat). (xyz_wxyz)"""
 
     @staticmethod
     def from_ply(ply_file: Path) -> GraspableToadObject:
@@ -207,6 +218,50 @@ class GraspableToadObject(ToadObject):
                 mesh.invert()
                 grasps = GraspableToadObject._compute_grasps(mesh)
             assert grasps is not None, "No grasps found for the object, is the mesh correct?"
+            grasp_list.append(grasps)
+
+        return GraspableToadObject(
+            points=toad.points,
+            clusters=toad.clusters,
+            _meshes=toad._meshes,
+            scene_scale=toad.scene_scale,
+            grasps=grasp_list
+        )
+
+    @staticmethod
+    def dummy_object() -> GraspableToadObject:
+        toad = ToadObject.dummy_object()
+        mesh_list = toad._meshes
+        grasp_list = []
+        for mesh in mesh_list:
+            grasps = None
+            try:
+                grasps = GraspableToadObject._compute_grasps(mesh)
+            except:
+                pass
+            if grasps is None:
+                # Check if the mesh is inverted...
+                mesh.invert()
+                grasps = GraspableToadObject._compute_grasps(mesh)
+            assert grasps is not None, "No grasps found for the object, is the mesh correct?"
+            grasp_list.append(grasps)
+
+        return GraspableToadObject(
+            points=toad.points,
+            clusters=toad.clusters,
+            _meshes=toad._meshes,
+            scene_scale=toad.scene_scale,
+            grasps=grasp_list
+        )
+
+    @staticmethod
+    def from_mesh(mesh: trimesh.Trimesh) -> GraspableToadObject:
+        toad = ToadObject.from_mesh(mesh)
+        # Compute grasps. :-)
+        mesh_list = toad._meshes
+        grasp_list = []
+        for mesh in mesh_list:
+            grasps = GraspableToadObject._compute_grasps(mesh)
             grasp_list.append(grasps)
 
         return GraspableToadObject(
@@ -330,12 +385,15 @@ class GraspableToadObject(ToadObject):
             vtf.SE3.from_translation(
                 translation=np.array([
                     [d, 0, 0]
-                    for d in np.linspace(-0.005, 0.005, num_translations)
+                    for d in np.linspace(-0.01, 0.01, num_translations)
                 ])
             )
         )
-        augs = vtf.SE3(np.tile(rot_augs.wxyz_xyz, (trans_augs.wxyz_xyz.shape[0], 1))).multiply(
-            vtf.SE3(np.repeat(trans_augs.wxyz_xyz, rot_augs.wxyz_xyz.shape[0], axis=0))
+        # augs = vtf.SE3(np.tile(rot_augs.wxyz_xyz, (trans_augs.wxyz_xyz.shape[0], 1))).multiply(
+        #     vtf.SE3(np.repeat(trans_augs.wxyz_xyz, rot_augs.wxyz_xyz.shape[0], axis=0))
+        # )
+        augs = vtf.SE3(np.repeat(trans_augs.wxyz_xyz, rot_augs.wxyz_xyz.shape[0], axis=0)).multiply(
+            vtf.SE3(np.tile(rot_augs.wxyz_xyz, (trans_augs.wxyz_xyz.shape[0], 1)))
         )
 
         len_grasps = grasps.wxyz_xyz.shape[0]

@@ -5,15 +5,17 @@ robot_cfg:
     
     base_link: "base_link"
     ee_link: "gripper_l_base"  # "end effector"
+    # ee_link: "gripper_r_base"  # "end effector"
     link_names: ["gripper_l_base", "gripper_r_base"]  # "additional links you may want to track -- useful for multi-robot or bimanual"
     lock_joints: null
     extra_links: null
     
-    collision_link_names: ["yumi_link_1_l",
-    "yumi_link_2_l","yumi_link_3_l","yumi_link_4_l","yumi_link_5_l","yumi_link_6_l","yumi_link_7_l",
-                            "gripper_l_base","gripper_l_finger_r","gripper_l_finger_l",
-                          "yumi_link_1_r","yumi_link_2_r","yumi_link_3_r","yumi_link_4_r","yumi_link_5_r","yumi_link_6_r","yumi_link_7_r",
-                          "gripper_r_base","gripper_r_finger_r","gripper_r_finger_l"]
+    collision_link_names: [
+      "yumi_link_1_l", "yumi_link_2_l","yumi_link_3_l","yumi_link_4_l","yumi_link_5_l","yumi_link_6_l","yumi_link_7_l",
+      "gripper_l_base", "gripper_l_finger_r","gripper_l_finger_l",
+      "yumi_link_1_r","yumi_link_2_r","yumi_link_3_r","yumi_link_4_r","yumi_link_5_r","yumi_link_6_r","yumi_link_7_r",
+      "gripper_r_base", "gripper_r_finger_r","gripper_r_finger_l",
+    ]
     self_collision_ignore:
       {
         # "gripper_l_base": ["gripper_l_finger_r", "gripper_l_finger_l", "yumi_link_7_l"],
@@ -52,20 +54,39 @@ robot_cfg:
           "yumi_link_3_l", "yumi_link_4_l", "yumi_link_5_l",
           "yumi_link_1_r",  # cannot hit the other arm.
         ],
+        # # 3, hits nothing.
+        # "yumi_link_3_l": ["yumi_link_4_l", "yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # # 4, also hits nothing.
+        # "yumi_link_4_l": ["yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # # 5, also hits nothing.
+        # "yumi_link_5_l": ["yumi_link_6_l", "yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # # 6, ignores 7, gripper base, and fingers.
+        # "yumi_link_6_l": ["yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # # 7, ignores gripper base, and fingers.
+        # "yumi_link_7_l": ["gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        # # Gripper should ignore finger.
+        # "gripper_l_base": ["gripper_l_finger_r", "gripper_l_finger_l"],
+        # # Fingers should ignore each other.
+        # "gripper_l_finger_r": ["gripper_l_finger_l"],
+
         # 3, hits nothing.
-        "yumi_link_3_l": ["yumi_link_4_l", "yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        "yumi_link_3_l": ["yumi_link_4_l", "yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base",],
         # 4, also hits nothing.
-        "yumi_link_4_l": ["yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        "yumi_link_4_l": ["yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base",],
         # 5, also hits nothing.
-        "yumi_link_5_l": ["yumi_link_6_l", "yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        "yumi_link_5_l": ["yumi_link_6_l", "yumi_link_7_l", "gripper_l_base",],
         # 6, ignores 7, gripper base, and fingers.
-        "yumi_link_6_l": ["yumi_link_7_l", "gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
+        "yumi_link_6_l": ["yumi_link_7_l", "gripper_l_base",],
         # 7, ignores gripper base, and fingers.
-        "yumi_link_7_l": ["gripper_l_base", "gripper_l_finger_r", "gripper_l_finger_l"],
-        # Gripper should ignore finger.
-        "gripper_l_base": ["gripper_l_finger_r", "gripper_l_finger_l"],
-        # Fingers should ignore each other.
-        "gripper_l_finger_r": ["gripper_l_finger_l"],
+        "yumi_link_7_l": ["gripper_l_base",],
+        "gripper_l_finger_r": [
+          "yumi_link_3_l", "yumi_link_4_l", "yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base",
+          "gripper_l_finger_l",  # Fingers should ignore each other.
+        ],
+        "gripper_l_finger_l": [
+          "yumi_link_3_l", "yumi_link_4_l", "yumi_link_5_l", "yumi_link_6_l", "yumi_link_7_l", "gripper_l_base",
+          "gripper_l_finger_l",  # Fingers should ignore each other.
+        ],
 
         # Only the collision that we want to track, is (7, 6, gripper) with (yumi_link_1, and yumi_link_2).
         "yumi_link_1_r": ["yumi_link_2_r", "yumi_link_3_r", "yumi_link_4_r", "yumi_link_5_r"],
@@ -73,20 +94,39 @@ robot_cfg:
           "yumi_link_3_r", "yumi_link_4_r", "yumi_link_5_r",
           "yumi_link_1_l",  # cannot hit the other arm.
         ],
+        # # 3, hits nothing.
+        # "yumi_link_3_r": ["yumi_link_4_r", "yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base", "gripper_r_finger_l", "gripper_r_finger_r"],
+        # # 4, also hits nothing.
+        # "yumi_link_4_r": ["yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base", "gripper_r_finger_l", "gripper_r_finger_r"],
+        # # 5, also hits nothing.
+        # "yumi_link_5_r": ["yumi_link_6_r", "yumi_link_7_r", "gripper_r_base", "gripper_r_finger_l", "gripper_r_finger_r"],
+        # # 6, ignores 7, gripper base, and fingers.
+        # "yumi_link_6_r": ["yumi_link_7_r", "gripper_r_base", "gripper_r_finger_r", "gripper_r_finger_l"],
+        # # 7, ignores gripper base, and fingers.
+        # "yumi_link_7_r": ["gripper_r_base", "gripper_r_finger_r", "gripper_r_finger_l"],
+        # # Gripper should ignore finger.
+        # "gripper_r_base": ["gripper_r_finger_r", "gripper_r_finger_l"],
+        # # Fingers should ignore each other.
+        # "gripper_r_finger_r": ["gripper_r_finger_l"],
+
         # 3, hits nothing.
-        "yumi_link_3_r": ["yumi_link_4_r", "yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base", "gripper_r_finger_l", "gripper_r_finger_r"],
+        "yumi_link_3_r": ["yumi_link_4_r", "yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base",],
         # 4, also hits nothing.
-        "yumi_link_4_r": ["yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base", "gripper_r_finger_l", "gripper_r_finger_r"],
+        "yumi_link_4_r": ["yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base",],
         # 5, also hits nothing.
-        "yumi_link_5_r": ["yumi_link_6_r", "yumi_link_7_r", "gripper_r_base", "gripper_r_finger_l", "gripper_r_finger_r"],
+        "yumi_link_5_r": ["yumi_link_6_r", "yumi_link_7_r", "gripper_r_base",],
         # 6, ignores 7, gripper base, and fingers.
-        "yumi_link_6_r": ["yumi_link_7_r", "gripper_r_base", "gripper_r_finger_r", "gripper_r_finger_l"],
+        "yumi_link_6_r": ["yumi_link_7_r", "gripper_r_base",],
         # 7, ignores gripper base, and fingers.
-        "yumi_link_7_r": ["gripper_r_base", "gripper_r_finger_r", "gripper_r_finger_l"],
-        # Gripper should ignore finger.
-        "gripper_r_base": ["gripper_r_finger_r", "gripper_r_finger_l"],
-        # Fingers should ignore each other.
-        "gripper_r_finger_r": ["gripper_r_finger_l"],
+        "yumi_link_7_r": ["gripper_r_base",],
+        "gripper_r_finger_r": [
+          "yumi_link_3_r", "yumi_link_4_r", "yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base",
+          "gripper_r_finger_l",  # Fingers should ignore each other.
+        ],
+        "gripper_r_finger_l": [
+          "yumi_link_3_r", "yumi_link_4_r", "yumi_link_5_r", "yumi_link_6_r", "yumi_link_7_r", "gripper_r_base",
+          "gripper_r_finger_l",  # Fingers should ignore each other.
+        ],
       }
     collision_spheres:
       yumi_link_1_l:
@@ -216,107 +256,85 @@ robot_cfg:
         - "center": [-0.0038918803386646197, 0.0002733888786176554, 0.053294707774352246]
           "radius": 0.01
       yumi_link_1_r:
-        - "center": [0.013, -0.043, 0.093]
-          "radius": 0.045
-        - "center": [0.044, -0.043, 0.101]
-          "radius": 0.044
-        - "center": [0.005, -0.042, 0.072]
-          "radius": 0.044
-        - "center": [-0.025, -0.008, 0.022]
-          "radius": 0.032
-        - "center": [0.012, -0.01, 0.02]
-          "radius": 0.029
-        - "center": [0.028, -0.041, 0.074]
-          "radius": 0.043
-        - "center": [0.038, -0.044, 0.112]
-          "radius": 0.044
+        - "center": [0.005, -0.03, 0.0]
+          "radius": 0.04
+        - "center": [0.027, -0.042, 0.115]
+          "radius": 0.04
+        - "center": [0.011, -0.033, 0.029]
+          "radius": 0.04
+        - "center": [0.016, -0.036, 0.058]
+          "radius": 0.04
+        - "center": [0.022, -0.039, 0.086]
+          "radius": 0.04
       yumi_link_2_r:
-        - "center": [-0.03, 0.125, 0.002]
-          "radius": 0.058
-        - "center": [0.002, 0.003, -0.033]
-          "radius": 0.054
-        - "center": [-0.015, 0.018, -0.035]
-          "radius": 0.053
-        - "center": [-0.029, 0.103, -0.005]
-          "radius": 0.053
-        - "center": [-0.003, -0.003, -0.033]
-          "radius": 0.054
-        - "center": [-0.048, 0.142, -0.015]
-          "radius": 0.041
-        - "center": [-0.022, 0.13, -0.005]
-          "radius": 0.053
-        - "center": [-0.031, 0.096, 0.002]
+        - "center": [0.0, 0.0, -0.038]
           "radius": 0.05
-        - "center": [-0.053, 0.145, 0.015]
-          "radius": 0.037
+        - "center": [-0.031, 0.135, 0.0]
+          "radius": 0.05
+        - "center": [-0.008, 0.034, -0.028]
+          "radius": 0.05
+        - "center": [-0.016, 0.068, -0.019]
+          "radius": 0.05
+        - "center": [-0.024, 0.102, -0.009]
+          "radius": 0.05
       yumi_link_3_r:
-        - "center": [-0.043, -0.044, 0.087]
-          "radius": 0.045
-        - "center": [-0.024, -0.042, 0.062]
-          "radius": 0.043
-        - "center": [-0.052, -0.043, 0.07]
-          "radius": 0.043
-        - "center": [-0.025, -0.008, 0.018]
-          "radius": 0.028
-        - "center": [0.015, -0.003, 0.017]
-          "radius": 0.027
-        - "center": [0.0, -0.035, 0.054]
-          "radius": 0.034
-        - "center": [-0.031, -0.042, 0.087]
-          "radius": 0.044
+        - "center": [0.0, -0.015, 0.032]
+          "radius": 0.04
+        - "center": [-0.049, -0.041, 0.085]
+          "radius": 0.04
+        - "center": [-0.012, -0.022, 0.045]
+          "radius": 0.04
+        - "center": [-0.024, -0.028, 0.058]
+          "radius": 0.04
+        - "center": [-0.037, -0.034, 0.071]
+          "radius": 0.04
       yumi_link_4_r:
-        - "center": [-0.001, -0.002, -0.034]
-          "radius": 0.054
-        - "center": [0.038, 0.117, -0.003]
-          "radius": 0.052
-        - "center": [0.017, 0.014, -0.031]
-          "radius": 0.052
-        - "center": [0.039, 0.09, -0.002]
-          "radius": 0.049
-        - "center": [0.041, 0.127, 0.009]
-          "radius": 0.047
-        - "center": [0.041, 0.083, 0.007]
-          "radius": 0.045
-        - "center": [0.046, 0.132, -0.012]
-          "radius": 0.043
-        - "center": [0.039, 0.027, -0.02]
-          "radius": 0.036
+        - "center": [0.0, -0.0, -0.034]
+          "radius": 0.05
+        - "center": [0.038, 0.124, -0.0]
+          "radius": 0.05
+        - "center": [0.01, 0.031, -0.025]
+          "radius": 0.05
+        - "center": [0.019, 0.062, -0.017]
+          "radius": 0.05
+        - "center": [0.029, 0.093, -0.008]
+          "radius": 0.05
       yumi_link_5_r:
-        - "center": [-0.015, -0.048, 0.078]
-          "radius": 0.031
-        - "center": [-0.034, -0.048, 0.106]
-          "radius": 0.031
-        - "center": [0.008, -0.024, 0.02]
-          "radius": 0.028
-        - "center": [0.001, -0.045, 0.053]
-          "radius": 0.028
-        - "center": [-0.016, -0.024, 0.02]
-          "radius": 0.028
-        - "center": [-0.012, -0.046, 0.101]
-          "radius": 0.029
-        - "center": [0.023, -0.004, 0.015]
-          "radius": 0.024
-        - "center": [-0.008, 0.001, 0.014]
-          "radius": 0.024
-        - "center": [-0.021, -0.044, 0.055]
-          "radius": 0.026
+        - "center": [-0.0, 0.007, 0.016]
+          "radius": 0.03
+        - "center": [-0.0, -0.025, 0.026]
+          "radius": 0.025
+        - "center": [-0.032, -0.051, 0.107]
+          "radius": 0.025
+        - "center": [-0.008, -0.031, 0.046]
+          "radius": 0.025
+        - "center": [-0.016, -0.038, 0.066]
+          "radius": 0.025
+        - "center": [-0.024, -0.044, 0.087]
+          "radius": 0.025
       yumi_link_6_r:
-        - "center": [0.011, -0.013, -0.013]
-          "radius": 0.049
-        - "center": [0.006, -0.005, -0.022]
-          "radius": 0.047
-        - "center": [0.034, -0.001, -0.005]
-          "radius": 0.039
-        - "center": [0.028, -0.033, -0.006]
-          "radius": 0.038
-        - "center": [0.0, -0.029, -0.007]
-          "radius": 0.041
-        - "center": [-0.004, 0.005, -0.001]
-          "radius": 0.037
-        - "center": [0.003, -0.004, -0.036]
-          "radius": 0.041
-        - "center": [0.04, -0.022, -0.002]
-          "radius": 0.033
+        - "center": [-0.0, -0.035, 0.0]
+          "radius": 0.03
+        - "center": [0.031, -0.032, -0.005]
+          "radius": 0.03
+        - "center": [0.041, 0.008, -0.0]
+          "radius": 0.03
+        - "center": [0.035, -0.019, -0.003]
+          "radius": 0.03
+        - "center": [0.038, -0.005, -0.002]
+          "radius": 0.03
+        - "center": [-0.0, -0.0, -0.038]
+          "radius": 0.03
+        - "center": [-0.0, -0.023, -0.013]
+          "radius": 0.03
+        - "center": [-0.0, -0.012, -0.025]
+          "radius": 0.03
+        - "center": [0.028, 0.005, -0.013]
+          "radius": 0.03
+        - "center": [0.014, 0.003, -0.025]
+          "radius": 0.03
+        - "center": [0.0, 0.007, -0.0]
+          "radius": 0.03
       yumi_link_7_r:
         - "center": [-0.002, -0.016, 0.001]
           "radius": 0.022
@@ -337,16 +355,6 @@ robot_cfg:
           "radius": 0.037
         - "center": [-0.01, 0.002, 0.032]
           "radius": 0.041
-        - "center": [0.013, 0.005, 0.028]
-          "radius": 0.037
-        - "center": [-0.013, 0.001, 0.069]
-          "radius": 0.032
-        - "center": [0.011, 0.0, 0.07]
-          "radius": 0.032
-        - "center": [0.01, -0.013, 0.019]
-          "radius": 0.029
-        - "center": [0.011, 0.003, 0.044]
-          "radius": 0.039
       gripper_r_finger_r:
         - "center": [-0.009706450102750647, 0.003182477348002092, 0.019004757325335707]
           "radius": 0.014
@@ -383,11 +391,31 @@ robot_cfg:
     external_asset_path: null # Use this to add path for externally located assets/robot folder.
     lock_joints: {"gripper_l_joint": 0.025, "gripper_r_joint": 0.025}
     cspace:
-      joint_names: ["yumi_joint_1_l","yumi_joint_2_l","yumi_joint_7_l","yumi_joint_3_l","yumi_joint_4_l","yumi_joint_5_l","yumi_joint_6_l",
-                    "yumi_joint_1_r","yumi_joint_2_r","yumi_joint_7_r","yumi_joint_3_r","yumi_joint_4_r","yumi_joint_5_r","yumi_joint_6_r",
-                    ] #"gripper_l_joint","gripper_r_joint"] 
-      retract_config: [-1.24839656, -1.09802876,  1.06634394,  0.31386161,  1.90125141, 1.3205139 ,  2.43563939,
-                        1.21442839, -1.03205606, -1.10072738,  0.2987352, -1.85257716,  1.25363652, -2.42181893]
+      joint_names: [
+        "yumi_joint_1_l","yumi_joint_2_l","yumi_joint_7_l","yumi_joint_3_l","yumi_joint_4_l","yumi_joint_5_l","yumi_joint_6_l",
+        "yumi_joint_1_r","yumi_joint_2_r","yumi_joint_7_r","yumi_joint_3_r","yumi_joint_4_r","yumi_joint_5_r","yumi_joint_6_r",
+      ]
+      # retract_config: [0, -0.8,  0.5, 0.4, 0.0, 0.5, 0,
+      #                  0, -0.8, -0.5, 0.4, 0.0, 0.5, 0]
+
+      retract_config: [
+          -1.24839656,
+          -1.09802876,
+          1.06634394,
+          0.31386161,
+          1.90125141,
+          1.3205139,
+          2.43563939,
+
+          1.21442839,
+          -1.03205606,
+          -1.10072738,
+          0.2987352,
+          -1.85257716,
+          1.25363652,
+          -2.42181893,
+      ]
+
       null_space_weight: [1,1,1,1,1,1,1,  1,1,1,1,1,1,1]
       cspace_distance_weight: [1,1,1,1,1,1,1,  1,1,1,1,1,1,1]
       max_jerk: 500.0
