@@ -211,14 +211,14 @@ def motion_plan_yumi(
         loss_terms["lim_low"] = limits_weight * torch.sum(
             torch.minimum(
                 recovered_traj.new_zeros(1),
-                recovered_traj - (yumi_urdf.limits_lower - limits_pad)[None, :],
+                recovered_traj - (yumi_urdf.limits_lower + limits_pad)[None, :],
             )
             ** 2
         )
         loss_terms["lim_up"] = limits_weight * torch.sum(
             torch.maximum(
                 recovered_traj.new_zeros(1),
-                recovered_traj - (yumi_urdf.limits_upper + limits_pad)[None, :],
+                recovered_traj - (yumi_urdf.limits_upper - limits_pad)[None, :],
             )
             ** 2
         )
