@@ -313,14 +313,13 @@ def main(
     traj[:, 7:14] = raw_traj[:, :7]
     del raw_traj
 
+    # Forward kinematics with loaded trajectory.
     print("Running FK...")
-    Ts_world_joint = onp.array(jax_urdf.forward_kinematics(traj[0]))
-    print(Ts_world_joint.shape)
-
     timesteps = traj.shape[0]
     orig_Ts_world_joint = jax_urdf.forward_kinematics(jnp.array(traj))
     assert orig_Ts_world_joint.shape == (timesteps, jax_urdf.num_joints, 7)
 
+    # Solve. This is the runtime with JIT compilation.
     start_time = time.time()
     opt_traj = onp.array(
         motion_plan_yumi(
@@ -332,9 +331,11 @@ def main(
             },
         )
     )
-    print(time.time() - start_time, "!!!!")
-    start_time = time.time()
+    assert opt_traj.shape == (timesteps, 16)
+    print("Motion planning finished in", time.time() - start_time, "seconds")
 
+    # Solve again. This timing is without the JIT compilation.
+    start_time = time.time()
     opt_traj = onp.array(
         motion_plan_yumi(
             jax_urdf,
@@ -345,14 +346,16 @@ def main(
             },
         )
     )
-    print(time.time() - start_time, "!!!!")
+    assert opt_traj.shape == (timesteps, 16)
+    print("Motion planning finished in", time.time() - start_time, "seconds")
 
+    # Check joint limits.
     if onp.any(opt_traj < jax_urdf.limits_lower) or onp.any(
         opt_traj > jax_urdf.limits_upper
     ):
         print("Violated joint limits!!")
     else:
-        print("Trajectory is within joint limits!")
+        print("🎉🎉🎉 Trajectory is within joint limits! 🎉🎉🎉")
 
     # Visualize two robots: original and smoothed.
     server = viser.ViserServer()
