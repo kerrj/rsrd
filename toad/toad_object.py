@@ -330,7 +330,7 @@ class GraspableToadObject(ToadObject):
             vtf.SE3.from_translation(
                 translation=np.array([
                     [d, 0, 0]
-                    for d in np.linspace(-0.01, 0.01, num_translations)
+                    for d in np.linspace(-0.005, 0.005, num_translations)
                 ])
             )
         )

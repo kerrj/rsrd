@@ -24,7 +24,7 @@ from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGen
 from curobo.geom.types import WorldConfig
 from curobo.geom.sdf.world import CollisionCheckerType, WorldCollision, WorldCollisionConfig
 from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
-from curobo.geom.types import Sphere, Cuboid
+from curobo.geom.types import Sphere, Cuboid, Mesh
 from curobo.wrap.reacher.trajopt import TrajOptResult, TrajOptSolver, TrajOptSolverConfig
 
 # TODO decide if 14, or 16,. -- gripper...?
@@ -44,6 +44,9 @@ class YumiPlanner:
     _motion_gen: MotionGen
     """The motion generation object."""
     _batch_size: int
+    """The batch size for the planner."""
+    table_height: float
+    """The height of the table, in world coordinates."""
 
     def __init__(
         self,
@@ -58,6 +61,7 @@ class YumiPlanner:
 
         # Create a base table for world collision.
         self._batch_size = batch_size
+        self.table_height = table_height
         self._setup(
             world_config=self.createTableWorld(table_height),
         )
@@ -102,14 +106,14 @@ class YumiPlanner:
             robot_cfg,
             None,
             rotation_threshold=0.05,
-            position_threshold=0.005,
+            position_threshold=0.01,
             num_ik_seeds=10,
             num_trajopt_seeds=4,
             interpolation_dt=0.25,
             trajopt_dt=0.25,
             collision_activation_distance=0.01,
             interpolation_steps=30,
-            world_coll_checker=self._robot_world.world_model,
+            # world_coll_checker=self._robot_world.world_model,
             use_cuda_graph=True,
         )
         self._motion_gen = MotionGen(motion_gen_config)
@@ -147,6 +151,20 @@ class YumiPlanner:
         # Need to clear the world cache, as per in: https://github.com/NVlabs/curobo/issues/263.
         self._robot_world.clear_world_cache()
         self._robot_world.update_world(world_config)
+
+    def update_world_objects(self, objects: Union[List[Sphere], List[Mesh]]):
+        """Update the world objects -- reinstantiates the world table, too."""
+        # Need to clear the world cache, as per in: https://github.com/NVlabs/curobo/issues/263.
+        world_config = self.createTableWorld(self.table_height)
+        assert isinstance(world_config.mesh, list) and isinstance(world_config.sphere, list)
+        for obj in objects:
+            if isinstance(obj, Sphere):
+                world_config.sphere.append(obj)
+            elif isinstance(obj, Mesh):
+                world_config.mesh.append(obj)
+            else:
+                raise ValueError(f"Unsupported object type., {type(objects[0])}")
+        self.update_world(world_config)
 
     def in_collision(self, q: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns d_world, d_self.
@@ -371,6 +389,8 @@ class YumiPlanner:
         batch_size = path_l_wxyz_xyz.shape[0]
 
         # TODO We also want to smoothen this out!
+        # TODO this ... doesn't consider collision.
+
         js_list: List[torch.Tensor] = []
         js_success_list: List[torch.Tensor] = []
         for idx in range(path_l_wxyz_xyz.shape[1]):
