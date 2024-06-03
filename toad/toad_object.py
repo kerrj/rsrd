@@ -364,7 +364,7 @@ class GraspableToadObject(ToadObject):
     @staticmethod
     def to_gripper_frame(
         grasps_tensor: torch.Tensor,
-        tooltip_to_gripper: vtf.SE3,
+        tooltip_to_gripper: Optional[vtf.SE3] = None,
         num_rotations: int = 8,
         num_translations: int = 3,
     ) -> vtf.SE3:
@@ -374,6 +374,8 @@ class GraspableToadObject(ToadObject):
             rotation=vtf.SO3(grasps_tensor[:, 3:].cpu().numpy()),
             translation=grasps_tensor[:, :3].cpu().numpy()
         )
+        if tooltip_to_gripper is None:
+            tooltip_to_gripper = vtf.SE3(wxyz_xyz=np.array([1, 0, 0, 0, 0, 0, 0]))
         rot_augs = (
             vtf.SE3.from_rotation(
                 rotation=vtf.SO3.from_x_radians(

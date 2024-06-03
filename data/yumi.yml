@@ -4,11 +4,8 @@ robot_cfg:
     asset_root_path: "data/yumi_description"
     
     base_link: "base_link"
-    ee_link: "gripper_l_base"  # "end effector"
-    # ee_link: "gripper_r_base"  # "end effector"
+    ee_link: "gripper_r_base"  # "end effector"
     link_names: ["gripper_l_base", "gripper_r_base"]  # "additional links you may want to track -- useful for multi-robot or bimanual"
-    lock_joints: null
-    extra_links: null
     
     collision_link_names: [
       "yumi_link_1_l", "yumi_link_2_l","yumi_link_3_l","yumi_link_4_l","yumi_link_5_l","yumi_link_6_l","yumi_link_7_l",
@@ -392,8 +389,8 @@ robot_cfg:
     lock_joints: {"gripper_l_joint": 0.025, "gripper_r_joint": 0.025}
     cspace:
       joint_names: [
-        "yumi_joint_1_l","yumi_joint_2_l","yumi_joint_7_l","yumi_joint_3_l","yumi_joint_4_l","yumi_joint_5_l","yumi_joint_6_l",
-        "yumi_joint_1_r","yumi_joint_2_r","yumi_joint_7_r","yumi_joint_3_r","yumi_joint_4_r","yumi_joint_5_r","yumi_joint_6_r",
+        "yumi_joint_1_r","yumi_joint_2_r","yumi_joint_7_r","yumi_joint_3_r","yumi_joint_4_r","yumi_joint_5_r","yumi_joint_6_r","gripper_r_joint",
+        "yumi_joint_1_l","yumi_joint_2_l","yumi_joint_7_l","yumi_joint_3_l","yumi_joint_4_l","yumi_joint_5_l","yumi_joint_6_l","gripper_l_joint"
       ]
       # retract_config: [0, -0.8,  0.5, 0.4, 0.0, 0.5, 0,
       #                  0, -0.8, -0.5, 0.4, 0.0, 0.5, 0]
@@ -406,6 +403,7 @@ robot_cfg:
           1.90125141,
           1.3205139,
           2.43563939,
+          0.025,
 
           1.21442839,
           -1.03205606,
@@ -414,10 +412,11 @@ robot_cfg:
           -1.85257716,
           1.25363652,
           -2.42181893,
+          0.025,
       ]
 
-      null_space_weight: [1,1,1,1,1,1,1,  1,1,1,1,1,1,1]
-      cspace_distance_weight: [1,1,1,1,1,1,1,  1,1,1,1,1,1,1]
+      null_space_weight: [1,1,1,1,1,1,1,  1,1,1,1,1,1,1, 1,1]
+      cspace_distance_weight: [1,1,1,1,1,1,1,  1,1,1,1,1,1,1, 1,1]
       max_jerk: 500.0
       max_acceleration: 15.0
 
