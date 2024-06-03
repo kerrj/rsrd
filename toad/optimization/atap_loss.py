@@ -13,7 +13,7 @@ def jon_loss(x: float,alpha:float, c:float):
 @wp.kernel
 def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = float), ids: wp.array(dtype = int),
                match_ids: wp.array(dtype = int), group_ids1: wp.array(dtype = int), group_ids2: wp.array(dtype=int), 
-               connectivity_weights: wp.array(dtype = float,ndim = 2), loss: wp.array(dtype = float)):
+               connectivity_weights: wp.array(dtype = float,ndim = 2), loss: wp.array(dtype = float), alpha: float):
     tid = wp.tid()
     id1 = ids[tid]
     id2 = match_ids[tid]
@@ -21,13 +21,14 @@ def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = floa
     gid2 = group_ids2[tid]
     con_weight = connectivity_weights[gid1,gid2]
     curdist = wp.length(cur_means[id1] - cur_means[id2])
-    # loss[tid] = wp.abs(curdist - dists[tid]) * con_weight
-    loss[tid] = jon_loss(curdist - dists[tid], -0.1, 0.005) * con_weight * .005
+    loss[tid] = jon_loss(curdist - dists[tid], alpha, 0.001) * con_weight * .001
     
+
 class ATAPLoss:
-    touch_radius: float = .0015
-    N: int = 300
-    loss_mult: float = .1
+    touch_radius: float = .002
+    N: int = 500
+    loss_mult: float = .2
+    loss_alpha: float = 1.0 #rule: for jointed, use 1.0 alpha, for non-jointed use .1
     def __init__(self, dig_model: DiGModel, group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float = 1.0):
         """
         Initializes the data structure to compute the loss between groups touching
@@ -67,7 +68,7 @@ class ATAPLoss:
             kernel = atap_loss,
             inputs = [wp.from_torch(self.dig_model.gauss_params['means'],dtype=wp.vec3),wp.from_torch(self.dists),
                       wp.from_torch(self.ids),wp.from_torch(self.match_ids),wp.from_torch(self.group_ids1),
-                      wp.from_torch(self.group_ids2),wp.from_torch(connectivity_weights),loss]
+                      wp.from_torch(self.group_ids2),wp.from_torch(connectivity_weights),loss, self.loss_alpha]
         )
         return (wp.to_torch(loss)/self.num_pairs).sum()*self.loss_mult
         

@@ -28,7 +28,7 @@ class Zed():
         if recording_file is not None:
             init.set_from_svo_file(recording_file)
             # disable depth
-            # init.camera_image_flip = sl.FLIP_MODE.ON
+            init.camera_image_flip = sl.FLIP_MODE.ON
             init.depth_mode=sl.DEPTH_MODE.NONE
             init.camera_resolution = sl.RESOLUTION.HD1080
             init.sdk_verbose = 1

@@ -123,7 +123,7 @@ class RigidGroupOptimizer:
     pose_lr: float = 0.005
     pose_lr_final: float = 0.0005
     mask_hands: bool = False
-    use_roi: bool = True
+    use_roi: bool = False
 
     init_p2o: torch.Tensor
     """From: part, To: object. in current world frame. Part frame is centered at part centroid, and object frame is centered at object centroid."""
@@ -142,6 +142,7 @@ class RigidGroupOptimizer:
         This one takes in a list of gaussian ID masks to optimize local poses for
         Each rigid group can be optimized independently, with no skeletal constraints
         """
+        assert self.use_roi is False, "ROI seems to be cursed, dont use"
         self.dataset_scale = dataset_scale
         self.tape = None
         self.is_initialized = False
@@ -329,22 +330,23 @@ class RigidGroupOptimizer:
                 best_loss = loss
                 best_outputs = dig_outputs
                 best_pose = final_pose
-        _,_,best_pose = try_opt(best_pose,50,depth=True)
+        _,_,best_pose = try_opt(best_pose,50,depth=metric_depth)
         self.reset_transforms()
-        self.apply_to_model(
-            best_pose,
-            self.dig_model.means.mean(dim=0, keepdim=True).repeat(
-                self.dig_model.num_points, 1
-            ),
-            torch.zeros(self.dig_model.num_points).int().cuda(),
-        )
-        self.objreg2objinit = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-            vtf.SO3(best_pose[0,3:].cpu().numpy()), best_pose[0,:3].cpu().numpy().squeeze()
-            ).as_matrix()).float().cuda()
-        self._init_centroids()#overwrites the init positions to force the object at the center
-        with torch.no_grad():
-            self.pose_deltas[:, 3:] = torch.tensor([1, 0, 0, 0], dtype=torch.float32, device="cuda")
-            self.pose_deltas[:, :3] = 0
+        with self.render_lock:
+            self.apply_to_model(
+                best_pose,
+                self.dig_model.means.mean(dim=0, keepdim=True).repeat(
+                    self.dig_model.num_points, 1
+                ),
+                torch.zeros(self.dig_model.num_points).int().cuda(),
+            )
+            self.objreg2objinit = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
+                vtf.SO3(best_pose[0,3:].cpu().numpy()), best_pose[0,:3].cpu().numpy().squeeze()
+                ).as_matrix()).float().cuda()
+            self._init_centroids()#overwrites the init positions to force the object at the center
+            with torch.no_grad():
+                self.pose_deltas[:, 3:] = torch.tensor([1, 0, 0, 0], dtype=torch.float32, device="cuda")
+                self.pose_deltas[:, :3] = 0
         return xs, ys, best_outputs, renders
 
     def get_poses_relative_to_camera(self, c2w: torch.Tensor, keyframe: Optional[int] = None):
