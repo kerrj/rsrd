@@ -13,3 +13,6 @@
 [submodule "dependencies/poco"]
 	path = dependencies/poco
 	url = git@github.com:pocoproject/poco.git
+[submodule "dependencies/jaxfg"]
+	path = dependencies/jaxfg
+	url = https://github.com/brentyi/jaxfg.git
