@@ -49,7 +49,7 @@ def depth_ranking_loss(rendered_depth, gt_depth):
     Assumes that the layout of the batch comes from a PairPixelSampler, so that adjacent samples in the gt_depth
     and rendered_depth are from pixels with a radius of each other
     """
-    m = 1e-2
+    m = 1e-4
     if rendered_depth.shape[0] % 2 != 0:
         # chop off one index
         rendered_depth = rendered_depth[:-1, :]
@@ -118,6 +118,7 @@ def mnn_matcher(feat_a, feat_b):
 
 class RigidGroupOptimizer:
     use_depth: bool = True
+    rank_loss_mult: float = 0.05
     depth_ignore_threshold: float = 0.1  # in meters
     use_atap: bool = True
     pose_lr: float = 0.005
@@ -277,7 +278,7 @@ class RigidGroupOptimizer:
                         rend_samples = disparity[rand_samples]
                         mono_samples = self.frame_depth[rand_samples]
                         rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                        loss = loss + 0.5 * rank_loss
+                        loss = loss + self.rank_loss_mult * rank_loss
                 loss.backward()
                 tape.backward()
                 optimizer.step()
@@ -483,7 +484,7 @@ class RigidGroupOptimizer:
                     rend_samples = disparity[rand_samples]
                     mono_samples = self.frame_depth[rand_samples]
                     rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                    loss = loss + .1*rank_loss
+                    loss = loss + self.rank_loss_mult*rank_loss
             if use_rgb:
                 loss = loss + 0.05 * (dig_outputs["rgb"] - self.rgb_frame).abs().mean()
             if self.use_atap:
