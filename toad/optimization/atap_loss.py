@@ -4,6 +4,12 @@ from typing import List
 from lerf.dig import DiGModel
 import warp as wp
 
+#https://openaccess.thecvf.com/content_CVPR_2019/papers/Barron_A_General_and_Adaptive_Robust_Loss_Function_CVPR_2019_paper.pdf
+@wp.func
+def jon_loss(x: float,alpha:float, c:float):
+    pow_part = (((x/c)**2.0)/wp.abs(alpha-2.0) + 1.0)
+    return (wp.abs(alpha-2.0)/alpha) * (wp.pow(pow_part,alpha/2.0) - 1.0)
+
 @wp.kernel
 def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = float), ids: wp.array(dtype = int),
                match_ids: wp.array(dtype = int), group_ids1: wp.array(dtype = int), group_ids2: wp.array(dtype=int), 
@@ -15,12 +21,13 @@ def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = floa
     gid2 = group_ids2[tid]
     con_weight = connectivity_weights[gid1,gid2]
     curdist = wp.length(cur_means[id1] - cur_means[id2])
-    loss[tid] = wp.abs(curdist - dists[tid]) * con_weight
+    # loss[tid] = wp.abs(curdist - dists[tid]) * con_weight
+    loss[tid] = jon_loss(curdist - dists[tid], -0.1, 0.005) * con_weight * .005
     
 class ATAPLoss:
-    touch_radius: float = .001
-    N: int = 200
-    loss_mult: float = .01
+    touch_radius: float = .0015
+    N: int = 300
+    loss_mult: float = .1
     def __init__(self, dig_model: DiGModel, group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float = 1.0):
         """
         Initializes the data structure to compute the loss between groups touching

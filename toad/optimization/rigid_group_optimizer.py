@@ -118,8 +118,8 @@ def mnn_matcher(feat_a, feat_b):
 
 class RigidGroupOptimizer:
     use_depth: bool = True
-    depth_ignore_threshold: float = 0.05  # in meters
-    use_atap: bool = False
+    depth_ignore_threshold: float = 0.1  # in meters
+    use_atap: bool = True
     pose_lr: float = 0.005
     pose_lr_final: float = 0.0005
     mask_hands: bool = False
@@ -481,7 +481,7 @@ class RigidGroupOptimizer:
                     rend_samples = disparity[rand_samples]
                     mono_samples = self.frame_depth[rand_samples]
                     rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                    loss = loss + .5*rank_loss
+                    loss = loss + .1*rank_loss
             if use_rgb:
                 loss = loss + 0.05 * (dig_outputs["rgb"] - self.rgb_frame).abs().mean()
             if self.use_atap:
@@ -588,7 +588,7 @@ class RigidGroupOptimizer:
             self.dig_model.gauss_params["means"] = self.init_means.detach().clone()
             self.dig_model.gauss_params["quats"] = self.init_quats.detach().clone()
     
-    def get_ROI(self, inflate = .2):
+    def get_ROI(self, inflate = 0.3):
         """
         returns the bounding box of the object in the current frame
 
@@ -600,9 +600,10 @@ class RigidGroupOptimizer:
             with self.render_lock:
                 self.dig_model.eval()
                 self.apply_to_model(self.pose_deltas.detach(), self.centroids, self.group_labels)
-                object_mask = self.dig_model.get_outputs(self.init_c2o)["accumulation"] > 0.7
+                object_mask = self.dig_model.get_outputs(self.init_c2o)["accumulation"] > 0.8
             valids = torch.where(object_mask)
-            inflate_amnt = (inflate*(valids[0].max() - valids[0].min()).item(), inflate*(valids[1].max() - valids[1].min()).item())
+            inflate_amnt = (inflate*(valids[0].max() - valids[0].min()).item(),
+                            inflate*(valids[1].max() - valids[1].min()).item())
             candidate_roi = (valids[0].min().item() - inflate_amnt[0], inflate_amnt[0] + valids[0].max().item(), 
                     valids[1].min().item() - inflate_amnt[1], inflate_amnt[1] + valids[1].max().item())
             #clip ROI to image bounds
