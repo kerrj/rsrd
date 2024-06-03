@@ -10,11 +10,12 @@ import open3d as o3d
 import dataclasses
 from pathlib import Path
 import tyro
+import pickle as pkl
 
 from curobo.geom.types import Mesh, Sphere
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class ToadObject:
     """
     Note that all objects/parts/grasps are stored in *metric* scale, not nerfstudio.
@@ -29,6 +30,8 @@ class ToadObject:
     scene_scale: float
     """Scale of the scene. Used to convert the object to metric scale. Default: 1.0.
     This is defined as: (point in metric) = (point in scene) / scene_scale."""
+    keyframes: Optional[torch.Tensor] = None
+    """Keyframes for the objcet parts2cam poses, if available. Shape: (duration, N, 7 (wxyz_xyz))."""
 
     @staticmethod
     def from_ply(ply_file: Path) -> ToadObject:
@@ -173,8 +176,32 @@ class ToadObject:
         mask = self.clusters == cluster
         return self.points[mask].mean(dim=0)
 
+    def save(self, path: Path):
+        toad_data = self.__dict__
+        toad_data.pop('_meshes')  # Don't save the meshes, they can be regenerated.
+        path.write_bytes(pkl.dumps(toad_data))
+    
+    @classmethod
+    def load(cls, path: Path):
+        toad_data = pkl.loads(path.read_bytes())
+        points, clusters, scene_scale = toad_data['points'], toad_data['clusters'], toad_data['scene_scale']
+        part_mesh_list = []
+        for i in range(clusters.max() + 1):
+            mask = clusters == i
+            part_vertices = points[mask].numpy()  # saved as tensor.
+            assert isinstance(part_vertices, np.ndarray)
 
-@dataclasses.dataclass(frozen=True)
+            part_vertices = part_vertices * scene_scale
+            part_mesh = ToadObject._points_to_mesh(part_vertices)
+            part_mesh.vertices -= part_vertices.mean(axis=0)  # Center the mesh at the centroid.
+            part_mesh.vertices /= scene_scale
+
+            part_mesh_list.append(part_mesh)
+        toad_data['_meshes'] = part_mesh_list
+        return cls(**toad_data)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class GraspableToadObject(ToadObject):
     grasps: List[torch.Tensor]
     """List of grasps, of length N_clusters. Each element is a tensor of shape (N_grasps, 7), for grasp center and axis (quat). (xyz_wxyz)"""
@@ -391,9 +418,6 @@ class GraspableToadObject(ToadObject):
                 ])
             )
         )
-        # augs = vtf.SE3(np.tile(rot_augs.wxyz_xyz, (trans_augs.wxyz_xyz.shape[0], 1))).multiply(
-        #     vtf.SE3(np.repeat(trans_augs.wxyz_xyz, rot_augs.wxyz_xyz.shape[0], axis=0))
-        # )
         augs = vtf.SE3(np.repeat(trans_augs.wxyz_xyz, rot_augs.wxyz_xyz.shape[0], axis=0)).multiply(
             vtf.SE3(np.tile(rot_augs.wxyz_xyz, (trans_augs.wxyz_xyz.shape[0], 1)))
         )
