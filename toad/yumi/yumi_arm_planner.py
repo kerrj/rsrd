@@ -13,6 +13,8 @@ import trimesh
 import trimesh.creation
 from dataclasses import dataclass
 from threading import RLock
+from copy import deepcopy
+import tqdm
 
 # cuRobo
 from curobo.types.math import Pose
@@ -22,14 +24,14 @@ from curobo.types.robot import RobotConfig
 from curobo.types.state import JointState
 from curobo.util_file import join_path, load_yaml
 from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig, IKResult
-from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig, MotionGenResult, PoseCostMetric
+from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig, MotionGenResult, PoseCostMetric, MotionGenStatus
 from curobo.geom.types import WorldConfig
 from curobo.geom.sdf.world import CollisionCheckerType, WorldCollision, WorldCollisionConfig
 from curobo.wrap.model.robot_world import RobotWorld, RobotWorldConfig
 from curobo.geom.types import Sphere, Cuboid, Mesh
 from curobo.wrap.reacher.trajopt import TrajOptResult, TrajOptSolver, TrajOptSolverConfig
 
-# Generally, really, really need to be careful of race condition here. 
+# Generally, really, really need to be careful of race condition here.
 
 YUMI_REST_POSE_LEFT = {
     "yumi_joint_1_l": -1.24839656,
@@ -65,6 +67,8 @@ class YumiArmPlanner:
     """Convenience object to store tensor type and device, for curobo."""
     _robot_world: RobotWorld
     """The robot world object, which contains the robot model and the world model (collision, etc)."""
+    _ik_solver:IKSolver
+    """The inverse kinematics solver object."""
     _motion_gen: MotionGen
     """The motion generation object."""
     _minibatch_size: int
@@ -73,6 +77,8 @@ class YumiArmPlanner:
     """The height of the table, in world coordinates."""
     _active_arm: Literal["left", "right"] = "left"
     """The arm that is currently active."""
+    _freeze_gripper: bool = True
+    """Whether to freeze the gripper joint when planning (i.e., remove it from DoF.)"""
 
     def __init__(
         self,
@@ -97,7 +103,7 @@ class YumiArmPlanner:
         self,
         world_config: WorldConfig,
     ):
-        robot_cfg = self.create_cfg("left")
+        robot_cfg = self.create_cfg("left", freeze_gripper=self._freeze_gripper)
         _robot_world_cfg = RobotWorldConfig.load_from_config(
             robot_config=robot_cfg,
             world_model=world_config,
@@ -106,6 +112,21 @@ class YumiArmPlanner:
         )
         self._robot_world = RobotWorld(_robot_world_cfg)
         assert isinstance(self._robot_world.world_model, WorldCollision)
+
+        ik_config = IKSolverConfig.load_from_robot_config(
+            robot_cfg,
+            None,
+            rotation_threshold=0.05,
+            position_threshold=0.005,
+            num_seeds=10,
+            self_collision_check=True,
+            self_collision_opt=True,
+            tensor_args=self._tensor_args,
+            collision_activation_distance=0.01,
+            world_coll_checker=self._robot_world.world_model,
+            use_cuda_graph=True,
+        )
+        self._ik_solver = IKSolver(ik_config)
 
         # Set up motion planning! This considers collisions.
         motion_gen_config = MotionGenConfig.load_from_robot_config(
@@ -125,11 +146,19 @@ class YumiArmPlanner:
             use_cuda_graph=True,
         )
         self._motion_gen = MotionGen(motion_gen_config)
+        # Warmup seems to get messed up with the arm-swapping here.
         # self._motion_gen.warmup(
         #     batch=self._minibatch_size,
         # )
 
-    def create_cfg(self, active_arm: Literal["left", "right"], locked_arm_q: Optional[torch.Tensor] = None) -> RobotConfig:
+        self.update_world_objects([])  # for ground, and camera.
+
+    def create_cfg(
+        self,
+        active_arm: Literal["left", "right"],
+        locked_arm_q: Optional[torch.Tensor] = None,
+        freeze_gripper: bool = True,
+    ) -> RobotConfig:
         """Load the robot model, while also locking the joints of the one of the arms. Locks the other arm at `locked_arm_q`."""
         # Create the robot model.
         cfg_file = load_yaml(join_path(self._base_dir, f"data/yumi.yml"))
@@ -140,6 +169,7 @@ class YumiArmPlanner:
         # If locking joint pos is provided, use that. Otherwise, lock at the rest pose.
         active_poses = YUMI_REST_POSE_LEFT if active_arm == "left" else YUMI_REST_POSE_RIGHT
         locking_poses = YUMI_REST_POSE_RIGHT if active_arm == "left" else YUMI_REST_POSE_LEFT
+        active_poses, locking_poses = deepcopy(active_poses), deepcopy(locking_poses)
         if locked_arm_q is not None:
             assert locked_arm_q.shape == (8,)
             cfg_file["robot_cfg"]["kinematics"]["lock_joints"] = {
@@ -153,10 +183,21 @@ class YumiArmPlanner:
             "left_dummy_point" if active_arm == "left" else "right_dummy_point"
         )
 
-        cfg_file["robot_cfg"]["kinematics"]["cspace"]["joint_names"] = list(active_poses.keys())
-        cfg_file["robot_cfg"]["kinematics"]["cspace"]["retract_config"] = list(active_poses.values())
-        cfg_file["robot_cfg"]["kinematics"]["cspace"]["null_space_weight"] = [1]*8
-        cfg_file["robot_cfg"]["kinematics"]["cspace"]["cspace_distance_weight"] = [1]*8
+        if freeze_gripper:
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["joint_names"] = list(active_poses.keys())[:-1]
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["retract_config"] = list(active_poses.values())[:-1]
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["null_space_weight"] = [1]*7
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["cspace_distance_weight"] = [1]*7
+
+            # Add gripper to the lock joints.
+            cfg_file["robot_cfg"]["kinematics"]["lock_joints"][
+                list(active_poses.keys())[-1]
+            ] = active_poses[list(active_poses.keys())[-1]]
+        else:
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["joint_names"] = list(active_poses.keys())
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["retract_config"] = list(active_poses.values())
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["null_space_weight"] = [1]*8
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["cspace_distance_weight"] = [1]*8
 
         robot_cfg = RobotConfig.from_dict(cfg_file, self._tensor_args)
         return robot_cfg
@@ -164,19 +205,25 @@ class YumiArmPlanner:
     @property
     def active_arm(self) -> Literal["left", "right"]:
         with self._active_arm_lock:
-            return self._active_arm    
+            return self._active_arm
 
-    def activate_arm(self, arm: Literal["left", "right"], locked_arm_q: Optional[torch.Tensor] = None):
+    @property
+    def gripper_frozen(self) -> bool:
+        with self._active_arm_lock:
+            return self._freeze_gripper
+
+    def activate_arm(self, arm: Literal["left", "right"], locked_arm_q: Optional[torch.Tensor] = None, freeze_gripper: bool = True):
         """Set the movable arm, and update the robot world."""
         if arm == self._active_arm:
             return
         with self._active_arm_lock:
             self._active_arm = arm
-            robot_cfg = self.create_cfg(arm, locked_arm_q=locked_arm_q)
+            robot_cfg = self.create_cfg(arm, locked_arm_q=locked_arm_q, freeze_gripper=freeze_gripper)
             # Running the update function is important.
             # Also, note that curobo originally has a bug in `copy_` for inplace self.lock_jointstate update.
             self._robot_world.kinematics.update_kinematics_config(robot_cfg.kinematics.kinematics_config)
             self._motion_gen.kinematics.update_kinematics_config(robot_cfg.kinematics.kinematics_config)
+            self._ik_solver.kinematics.update_kinematics_config(robot_cfg.kinematics.kinematics_config)
 
     @property
     def device(self) -> torch.device:
@@ -186,7 +233,10 @@ class YumiArmPlanner:
     def home_pos(self) -> torch.Tensor:
         """The home position of the robot, from yumi's retract config."""
         _home_pos = self._robot_world.kinematics.retract_config
-        assert type(_home_pos) == torch.Tensor
+        assert isinstance(_home_pos, torch.Tensor)
+        if self._freeze_gripper:
+            _home_pos = torch.cat([_home_pos, torch.Tensor([0.025]).to(self.device)], dim=-1)
+        assert _home_pos.shape == (8,)
         return _home_pos
 
     def fk(self, q: torch.Tensor) -> CudaRobotModelState:
@@ -200,7 +250,7 @@ class YumiArmPlanner:
         return state
 
     def ik(self, goal_wxyz_xyz: torch.Tensor, q_init: Optional[torch.Tensor] = None) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """Get the inverse kinematics of the robot, given the goal position.
+        """Get the inverse kinematics of the robot, given the goal position. This considers collision!
         Args:
             goal_wxyz_xyz: The goal position, in world coordinates (n, wxyz_xyz)
             q_init: The initial joint position to seed the IK from. If None, uses the retract position. (n, 8)
@@ -223,26 +273,31 @@ class YumiArmPlanner:
             assert goal_wxyz_xyz.shape == (batch_size, 7) and q_init.shape == (batch_size, 8)
 
             goal_pose = Pose(goal_wxyz_xyz[:, 4:], goal_wxyz_xyz[:, :4])
+            if self._freeze_gripper:
+                q_init = q_init[:, :-1].contiguous()  # remove gripper joint from dof.
 
             # Loop through IK.
             result_list = []
-            for i in range(0, batch_size, self._minibatch_size):
-                result = self._motion_gen.ik_solver.solve_batch(
-                    goal_pose=goal_pose[i : i+self._minibatch_size],
-                    seed_config=q_init[i : i+self._minibatch_size].unsqueeze(0),  # [1, batch, dof] for seed.
+            for i in tqdm.trange(0, batch_size, self._minibatch_size, desc="IK"):
+                result = self._ik_solver.solve_batch(
+                    goal_pose=goal_pose[i : i + self._minibatch_size],
+                    seed_config=q_init[i : i + self._minibatch_size].unsqueeze(0),  # [1, batch, dof] for seed.
                 )
                 result_list.append(result)
 
-        # js_solution is [batch, time, dof] tensor!
-        q = torch.cat([
-            result.solution for result in result_list  # type: ignore
-        ], dim=0)  # [batch, time, dof]
-        succ = torch.cat([
-            result.success for result in result_list  # type: ignore
-        ], dim=0)
+            # js_solution is [batch, time, dof] tensor!
+            q = torch.cat([
+                result.solution for result in result_list  # type: ignore
+            ], dim=0)  # [batch, time, dof]
+            succ = torch.cat([
+                result.success for result in result_list  # type: ignore
+            ], dim=0)
 
-        q = q[:, 0, :]  # [batch, dof]
-        succ = succ[:, 0]  # [batch]
+            q = q[:, 0, :]  # [batch, dof]
+            succ = succ[:, 0]  # [batch]
+
+            if self._freeze_gripper:
+                q = torch.cat([q, torch.Tensor([0.025]).expand(batch_size, 1).to(self.device)], dim=-1)
 
         assert q.shape == (batch_size, 8) and succ.shape == torch.Size([batch_size])
         return (q, succ)
@@ -264,7 +319,7 @@ class YumiArmPlanner:
         batch_size = goal_wxyz_xyz.shape[0]
         assert batch_size % self._minibatch_size == 0, f"Batch size ({batch_size}) must be divisible by {self._minibatch_size}."
         assert goal_wxyz_xyz.shape == (batch_size, 7)
-        assert q_init is None or q_init.shape == (batch_size, 8), f"q_init must be None or (batch_size, 8), got {q_init.shape}."
+        assert q_init is None or q_init.shape == (batch_size, 8), f"q_init must be None or (batch_size {batch_size}, 8), got {q_init.shape}."
 
         with self._active_arm_lock:
             if q_init is None:
@@ -275,45 +330,152 @@ class YumiArmPlanner:
             assert goal_wxyz_xyz.shape == (batch_size, 7) and q_init.shape == (batch_size, 8)
 
             goal_pose = Pose(goal_wxyz_xyz[:, 4:], goal_wxyz_xyz[:, :4])
-
-            # pose_cost_metric = PoseCostMetric.create_grasp_approach_metric(
-            #     offset_position=0.1, tstep_fraction=0.6
-            # )
+            if self._freeze_gripper:
+                q_init = q_init[:, :-1].contiguous()  # remove gripper joint from dof.
             start_state = JointState.from_position(q_init)
 
             result_list: List[MotionGenResult] = []
-            for i in range(0, batch_size, self._minibatch_size):
+            for i in tqdm.trange(0, batch_size, self._minibatch_size, desc="Motion"):
                 result = self._motion_gen.plan_batch(
                     start_state=start_state[i : i+self._minibatch_size],  # type: ignore
                     goal_pose=goal_pose[i : i+self._minibatch_size],
                     plan_config=MotionGenPlanConfig(
-                        max_attempts=10,
+                        max_attempts=1,
                         parallel_finetune=True,
-                        enable_graph=True,
-                        # pose_cost_metric=pose_cost_metric,  # can only do this w/ warmup
+                        # enable_graph=True,
                     ),
                 )
                 result_list.append(result)
 
-        tsteps = self._motion_gen.interpolation_steps
-        for result in result_list:
-            # If no solution is found, we set an invalid plan + set success ot false...
-            if result.interpolated_plan is None:
-                result.interpolated_plan = JointState.from_position(torch.zeros(
-                    (batch_size, tsteps, 8),
-                    device=self.device,
-                ))
-                result.success = torch.zeros(batch_size, device=self.device).bool()
-        
-        q = torch.cat([
-            result.interpolated_plan.position for result in result_list  # type: ignore
-        ], dim=0)  # [batch, time, dof]
-        succ = torch.cat([
-            result.success for result in result_list  # type: ignore
-        ], dim=0)  # [batch,]
+            tsteps = self._motion_gen.interpolation_steps
+            for result in result_list:
+                # If no solution is found, we set an invalid plan + set success ot false...
+                # if result.interpolated_plan is None:
+                #     result.interpolated_plan = JointState.from_position(torch.zeros(
+                #         (self._minibatch_size, tsteps, q_init.shape[-1]),  # match dof.
+                #         device=self.device,
+                #     ))
+                #     result.success = torch.zeros(batch_size, device=self.device).bool()
+                assert self._minibatch_size == 1, "This block assumes minibatch size of 1..."
+                if result.status == MotionGenStatus.IK_FAIL or result.status == MotionGenStatus.TRAJOPT_FAIL:
+                    result.interpolated_plan = JointState.from_position(torch.zeros(
+                        (tsteps, q_init.shape[-1]),  # match dof.
+                        device=self.device,
+                    ))
+                    result.success = torch.zeros(1, device=self.device).bool()
+                # elif result.interpolated_plan is None or len(result.interpolated_plan.position.shape) == 3:
+                #     result.interpolated_plan = JointState.from_position(torch.zeros(
+                #         (tsteps, q_init.shape[-1]),  # match dof.
+                #         device=self.device,
+                #     ))
+                #     result.success = torch.zeros(1, device=self.device).bool()
+
+            # result.interpolated_plan.position with minibatch_size 1 [time, dof] --> [batch, time, dof].
+            q = torch.cat([
+                result.interpolated_plan.position.unsqueeze(0) for result in result_list  # type: ignore
+            ], dim=0)  # [batch, time, dof]
+            succ = torch.cat([
+                result.success for result in result_list  # type: ignore
+            ], dim=0)  # [batch,]
+
+            if self._freeze_gripper:
+                q = torch.cat([q, torch.Tensor([0.025]).expand(batch_size, tsteps, 1).to(self.device)], dim=-1)
 
         assert q.shape == (batch_size, tsteps, 8) and succ.shape == torch.Size([batch_size])
         return (q, succ)
+
+    def gen_motion_from_goal_joints(
+        self,
+        goal_js: torch.Tensor,
+        q_init: Optional[torch.Tensor] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Get the inverse kinematics of the robot, given the goal position.
+        Args:
+            goal_wxyz_xyz: The goal position, in world coordinates (n, wxyz_xyz)
+            q_init: The initial joint position to seed the IK from. If None, uses the retract position. (n, 8)
+
+        Returns:
+            q: The trajectories that achieves the goal. (n, time, 8)
+            succ: Whether the IK was successful. (n,)
+        """
+        batch_size = goal_js.shape[0]
+        assert batch_size % self._minibatch_size == 0, f"Batch size ({batch_size}) must be divisible by {self._minibatch_size}."
+        assert goal_js.shape == (batch_size, 8)
+        assert q_init is None or q_init.shape == (batch_size, 8), f"q_init must be None or (batch_size {batch_size}, 8), got {q_init.shape}."
+
+        with self._active_arm_lock:
+            if q_init is None:
+                q_init = self.home_pos.view(1, -1).repeat(batch_size, 1)
+
+            goal_js = goal_js.to(self.device)
+            q_init = q_init.to(self.device)
+            assert goal_js.shape == (batch_size, 8) and q_init.shape == (batch_size, 8)
+
+            if self._freeze_gripper:
+                q_init = q_init[:, :-1].contiguous()  # remove gripper joint from dof.
+                goal_js = goal_js[:, :-1].contiguous()  # remove gripper joint from dof.
+            start_state = JointState.from_position(q_init)
+            goal_state = JointState.from_position(goal_js)
+
+            result_list: List[MotionGenResult] = []
+            assert self._minibatch_size == 1, "This block assumes minibatch size of 1..."
+            for i in tqdm.trange(0, batch_size, self._minibatch_size, desc="Motion"):
+                result = self._motion_gen.plan_single_js(
+                    start_state=start_state[i : i+self._minibatch_size],  # type: ignore
+                    goal_state=goal_state[i : i+self._minibatch_size],
+                    plan_config=MotionGenPlanConfig(
+                        max_attempts=1,
+                        parallel_finetune=True,
+                        # enable_graph=True,
+                    ),
+                )
+                result_list.append(result)
+
+            tsteps = self._motion_gen.interpolation_steps
+            for result in result_list:
+                # If no solution is found, we set an invalid plan + set success ot false...
+                # if result.interpolated_plan is None:
+                #     result.interpolated_plan = JointState.from_position(torch.zeros(
+                #         (self._minibatch_size, tsteps, q_init.shape[-1]),  # match dof.
+                #         device=self.device,
+                #     ))
+                #     result.success = torch.zeros(batch_size, device=self.device).bool()
+                assert self._minibatch_size == 1, "This block assumes minibatch size of 1..."
+                if result.status == MotionGenStatus.IK_FAIL or result.status == MotionGenStatus.TRAJOPT_FAIL or result.interpolated_plan is None:
+                    result.interpolated_plan = JointState.from_position(torch.zeros(
+                        (tsteps, q_init.shape[-1]),  # match dof.
+                        device=self.device,
+                    ))
+                    result.success = torch.zeros(1, device=self.device).bool()
+                # elif result.interpolated_plan is None or len(result.interpolated_plan.position.shape) == 3:
+                #     result.interpolated_plan = JointState.from_position(torch.zeros(
+                #         (tsteps, q_init.shape[-1]),  # match dof.
+                #         device=self.device,
+                #     ))
+                #     result.success = torch.zeros(1, device=self.device).bool()
+                elif result.interpolated_plan.position.shape[0] != tsteps:
+                    position = result.interpolated_plan.position
+                    assert isinstance(position, torch.Tensor)
+                    position = torch.cat([
+                        position,
+                        position[-1].unsqueeze(0).repeat(tsteps - position.shape[0], 1),
+                    ])
+                    result.interpolated_plan = JointState.from_position(position)
+
+            # result.interpolated_plan.position with minibatch_size 1 [time, dof] --> [batch, time, dof].
+            q = torch.cat([
+                result.interpolated_plan.position.unsqueeze(0) for result in result_list  # type: ignore
+            ], dim=0)  # [batch, time, dof]
+            succ = torch.cat([
+                result.success for result in result_list  # type: ignore
+            ], dim=0)  # [batch,]
+
+            if self._freeze_gripper:
+                q = torch.cat([q, torch.Tensor([0.025]).expand(batch_size, tsteps, 1).to(self.device)], dim=-1)
+
+        assert q.shape == (batch_size, tsteps, 8) and succ.shape == torch.Size([batch_size])
+        return (q, succ)
+
 
     @staticmethod
     def createTableWorld(table_height):
@@ -373,3 +535,19 @@ class YumiArmPlanner:
         d_world, d_self = self._robot_world.get_world_self_collision_distance_from_joint_trajectory(q)
 
         return (d_world.squeeze(), d_self.squeeze())
+
+    def get_robot_as_spheres(
+        self,
+        joint_pos: torch.Tensor,
+    ) -> List[trimesh.Trimesh]:
+        """Returns the robot as a list of spheres, given the joint positions."""
+        assert joint_pos.shape == (8,)
+        spheres: List[Sphere] = self._robot_world.kinematics.get_robot_as_spheres(joint_pos)[0]
+
+        return [
+            trimesh.creation.uv_sphere(
+                radius=sphere.radius,
+                transform=trimesh.transformations.translation_matrix(sphere.position)
+                )
+            for sphere in spheres
+        ]
