@@ -27,8 +27,8 @@ def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = floa
 class ATAPLoss:
     touch_radius: float = .002
     N: int = 500
-    loss_mult: float = .2
-    loss_alpha: float = 1.0 #rule: for jointed, use 1.0 alpha, for non-jointed use .1
+    loss_mult: float = .1
+    loss_alpha: float = 0.1 #rule: for jointed, use 1.0 alpha, for non-jointed use 0.1 ish
     def __init__(self, dig_model: DiGModel, group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float = 1.0):
         """
         Initializes the data structure to compute the loss between groups touching

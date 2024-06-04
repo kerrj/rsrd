@@ -58,8 +58,7 @@ def depth_ranking_loss(rendered_depth, gt_depth):
     out_diff = rendered_depth[::2, :] - rendered_depth[1::2, :] + m
     differing_signs = torch.sign(dpt_diff) != torch.sign(out_diff)
     loss = out_diff[differing_signs] * torch.sign(out_diff[differing_signs])
-    med = loss.quantile(0.5)
-    return loss[loss < med].mean()
+    return loss.mean()
 
 
 @wp.kernel
@@ -118,7 +117,8 @@ def mnn_matcher(feat_a, feat_b):
 
 class RigidGroupOptimizer:
     use_depth: bool = True
-    rank_loss_mult: float = 0.05
+    rank_loss_mult: float = 0.1
+    rank_loss_erode: int = 5
     depth_ignore_threshold: float = 0.1  # in meters
     use_atap: bool = True
     pose_lr: float = 0.005
@@ -263,8 +263,14 @@ class RigidGroupOptimizer:
                         loss = loss + pix_loss.mean()
                     else:
                         # This is ranking loss for monodepth (which is disparity)
-                        disparity = 1.0 / dig_outputs["depth"]
-                        N = 20000
+                        frame_depth = 1 / self.frame_depth # convert disparity to depth
+                        N = 30000
+                        # erode the mask by like 10 pixels
+                        object_mask = object_mask & (~self.frame_depth.isnan())
+                        object_mask = object_mask & (dig_outputs['depth'] > .05)
+                        object_mask = kornia.morphology.erosion(
+                            object_mask.squeeze().unsqueeze(0).unsqueeze(0).float(), torch.ones((self.rank_loss_erode, self.rank_loss_erode), device='cuda')
+                        ).squeeze().bool()
                         if self.mask_hands:
                             object_mask = object_mask & self.hand_mask.unsqueeze(-1)
                         valid_ids = torch.where(object_mask)
@@ -275,10 +281,10 @@ class RigidGroupOptimizer:
                             valid_ids[0][rand_samples],
                             valid_ids[1][rand_samples],
                         )
-                        rend_samples = disparity[rand_samples]
-                        mono_samples = self.frame_depth[rand_samples]
+                        rend_samples = dig_outputs["depth"][rand_samples]
+                        mono_samples = frame_depth[rand_samples]
                         rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                        loss = loss + self.rank_loss_mult * rank_loss
+                        loss = loss + self.rank_loss_mult*rank_loss
                 loss.backward()
                 tape.backward()
                 optimizer.step()
@@ -331,7 +337,7 @@ class RigidGroupOptimizer:
                 best_loss = loss
                 best_outputs = dig_outputs
                 best_pose = final_pose
-        _,_,best_pose = try_opt(best_pose,50,depth=metric_depth)
+        _,_,best_pose = try_opt(best_pose,150,depth=True)
         self.reset_transforms()
         with self.render_lock:
             self.apply_to_model(
@@ -444,7 +450,7 @@ class RigidGroupOptimizer:
                 self.reset_transforms()
                 raise RuntimeError("Lost tracking")
             with torch.no_grad():
-                object_mask = dig_outputs["accumulation"] > 0.8
+                object_mask = dig_outputs["accumulation"] > 0.9
             dino_feats = (
                 self.blur(dig_outputs["dino"].permute(2, 0, 1)[None])
                 .squeeze()
@@ -469,8 +475,14 @@ class RigidGroupOptimizer:
                     loss = loss + pix_loss.mean()
                 else:
                     # This is ranking loss for monodepth (which is disparity)
-                    disparity = 1.0 / dig_outputs["depth"]
-                    N = 20000
+                    frame_depth = 1 / self.frame_depth # convert disparity to depth
+                    N = 30000
+                    # erode the mask by like 10 pixels
+                    object_mask = object_mask & (~self.frame_depth.isnan())
+                    object_mask = object_mask & (dig_outputs['depth'] > .05)
+                    object_mask = kornia.morphology.erosion(
+                        object_mask.squeeze().unsqueeze(0).unsqueeze(0).float(), torch.ones((self.rank_loss_erode, self.rank_loss_erode), device='cuda')
+                    ).squeeze().bool()
                     if self.mask_hands:
                         object_mask = object_mask & self.hand_mask.unsqueeze(-1)
                     valid_ids = torch.where(object_mask)
@@ -481,8 +493,8 @@ class RigidGroupOptimizer:
                         valid_ids[0][rand_samples],
                         valid_ids[1][rand_samples],
                     )
-                    rend_samples = disparity[rand_samples]
-                    mono_samples = self.frame_depth[rand_samples]
+                    rend_samples = dig_outputs["depth"][rand_samples]
+                    mono_samples = frame_depth[rand_samples]
                     rank_loss = depth_ranking_loss(rend_samples, mono_samples)
                     loss = loss + self.rank_loss_mult*rank_loss
             if use_rgb:
