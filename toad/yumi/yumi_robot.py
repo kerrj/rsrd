@@ -382,7 +382,7 @@ def main(
             keyframes = torch.cat([moving_keyframes, anchor_keyframes], dim=1)
 
         else:
-            toad_obj = GraspableToadObject.load(toad_object_path)
+            toad_obj = GraspableToadObject.load(toad_object_path, resample=True)
             mesh_list = toad_obj.meshes
             keyframes = toad_obj.keyframes
 

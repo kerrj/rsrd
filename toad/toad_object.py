@@ -62,7 +62,7 @@ class ToadObject:
             scene_scale=scene_scale,
             _meshes=part_mesh_list,
         )
-    
+
     @staticmethod
     def from_points_and_clusters(
         points: np.ndarray,
@@ -129,10 +129,15 @@ class ToadObject:
             vertices=np.asarray(mesh.vertices),
             faces=np.asarray(mesh.triangles),
         )
-        mesh = mesh.simplify_quadric_decimation(200)
 
         # Smooth the mesh.
-        mesh = trimesh.smoothing.filter_mut_dif_laplacian(mesh)
+        # Purposely turn volume_constraint off, so that the mesh can... shrink.
+        mesh = trimesh.smoothing.filter_mut_dif_laplacian(
+            mesh, lamb=0.2, iterations=200, volume_constraint=False
+        )
+
+        # Simplify the mesh.
+        mesh = mesh.simplify_quadric_decimation(200)
 
         # Correct normals are important for grasp sampling!
         mesh.fix_normals()
@@ -173,7 +178,7 @@ class ToadObject:
             object_sphere_list = [item for sublist in object_sphere_list for item in sublist]
             return object_sphere_list
         return object_mesh_list
-    
+
     def centroid(self, cluster: int) -> torch.Tensor:
         """Get centroid of a given part. Every frame's part is defined at its centroid."""
         mask = self.clusters == cluster
@@ -183,12 +188,13 @@ class ToadObject:
         toad_data = self.__dict__
         toad_data.pop('_meshes')  # Don't save the meshes, they can be regenerated.
         path.write_bytes(pkl.dumps(toad_data))
-    
+
     @classmethod
-    def load(cls, path: Path):
+    def load(cls, path: Path, resample: bool = False):
         toad_data = pkl.loads(path.read_bytes())
         points, clusters, scene_scale = toad_data['points'], toad_data['clusters'], toad_data['scene_scale']
         part_mesh_list = []
+        grasp_list = []
         for i in range(clusters.max() + 1):
             mask = clusters == i
             part_vertices = points[mask].numpy()  # saved as tensor.
@@ -199,7 +205,15 @@ class ToadObject:
             part_mesh.vertices -= part_vertices.mean(axis=0)  # Center the mesh at the centroid.
             part_mesh.vertices /= scene_scale
 
+            if 'grasps' in toad_data and isinstance(cls, GraspableToadObject) and resample:
+                grasps = GraspableToadObject._compute_grasps(part_mesh)
+                grasp_list.append(grasps)
+
             part_mesh_list.append(part_mesh)
+
+        if 'grasps' in toad_data and isinstance(cls, GraspableToadObject) and resample:
+            toad_data['grasps'] = grasp_list
+
         toad_data['_meshes'] = part_mesh_list
         return cls(**toad_data)
 
@@ -345,6 +359,7 @@ class GraspableToadObject(ToadObject):
         assert isinstance(sampler, ParallelJawGraspSamplingPolicy)
 
         sampler.max_approach_angle = None  # No approach angle constraint -- so grasps can be offset from the z-axis.
+        sampler.max_normal_deviation = 45
 
         gripper = yaml_obj_loader.load('yumi_default')  # i.e., the small, plastic grippers.
         assert isinstance(gripper, ParallelJawGripper)

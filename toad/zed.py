@@ -74,7 +74,7 @@ class Zed():
             rotation=RigidTransform.quaternion_from_axis_angle(
                 np.array([1, 0, 0]) * (np.pi / 2)
             ),
-            translation=np.array([0.06, 0.042, -0.03]),
+            translation=np.array([0.06, 0.042, -0.035]),
         )
 
     def get_frame(
