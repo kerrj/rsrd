@@ -105,13 +105,13 @@ class ToadObject:
         return toad_obj
 
     @staticmethod
-    def from_mesh(mesh: trimesh.Trimesh) -> ToadObject:
-        points = mesh.vertices
-        clusters = np.zeros(len(points))
+    def from_mesh(mesh_list: List[trimesh.Trimesh]) -> ToadObject:
+        points = torch.cat([torch.from_numpy(mesh.vertices) for mesh in mesh_list], dim=0)
+        clusters = torch.cat([torch.ones(len(mesh.vertices))*idx for idx, mesh in enumerate(mesh_list)], dim=0)
         return ToadObject(
             points=torch.tensor(points),
             clusters=torch.tensor(clusters),
-            _meshes=[mesh],
+            _meshes=mesh_list,
             scene_scale=1.0,
         )
 
@@ -282,8 +282,8 @@ class GraspableToadObject(ToadObject):
         )
 
     @staticmethod
-    def from_mesh(mesh: trimesh.Trimesh) -> GraspableToadObject:
-        toad = ToadObject.from_mesh(mesh)
+    def from_mesh(mesh_list: List[trimesh.Trimesh]) -> GraspableToadObject:
+        toad = ToadObject.from_mesh(mesh_list)
         # Compute grasps. :-)
         mesh_list = toad._meshes
         grasp_list = []
@@ -414,7 +414,10 @@ class GraspableToadObject(ToadObject):
             vtf.SE3.from_translation(
                 translation=np.array([
                     [d, 0, 0]
-                    for d in np.linspace(-0.01, 0.01, num_translations)
+                    for d in (
+                        np.linspace(-0.002, 0.002, num_translations) if num_translations > 1
+                        else np.linspace(0, 0, 1)
+                    )
                 ])
             )
         )

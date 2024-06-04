@@ -70,16 +70,15 @@
   </gazebo>
   <!-- Fix to world just for testing -->
 
-  <!-- <link name="world"/> -->
+  <link name="world"/>
   
   <!--yumi-->
   <!--joint between {parent} and body-->
-<!--   <joint name="world_joint" type="fixed">
-    <origin rpy="0 0 0" xyz="0 0 0.1"/>
+  <joint name="world_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0.0"/>
     <parent link="world"/>
     <child link="base_link"/>
   </joint>
- -->  
   <link name="base_link">
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
@@ -99,15 +98,15 @@
 
   <!--///////////////////////////////////// Gazebo Camera Stuff /////////////////////////////////////-->
   <!-- <xacro:property name="camera_val" value="0.05" /> -->
-  <joint name="camera_joint" type="fixed">
+  <!-- <joint name="camera_joint" type="fixed">
     <axis xyz="0 1 0" />
     <origin xyz="0.6 0 0.6" rpy="0 0 0"/>
     <parent link="base_link"/>
     <child link="camera_link"/>
-  </joint>
+  </joint> -->
 
   <!-- Camera -->
-  <link name="camera_link">
+  <!-- <link name="camera_link">
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
@@ -128,7 +127,7 @@
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6" />
     </inertial>
-  </link>
+  </link> -->
 
   <!--///////////////////////////////////// RIGHT ARM ////////////////////////////////  -->
   <!-- joint between body and link_1_r -->
