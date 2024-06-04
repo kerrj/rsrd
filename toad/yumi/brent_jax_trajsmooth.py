@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import cast
+from typing import cast, Literal, Tuple
 
 import jax
 import jax_dataclasses as jdc
@@ -298,6 +298,159 @@ def motion_plan_yumi(
     assert out.shape == (timesteps, 16)
     return cast(Array, out)
 
+
+@jdc.jit
+def motion_plan_yumi_arm(
+    yumi_urdf: JaxUrdf,
+    pose_target_from_joint_idx: dict[int, Float[Array, "timesteps 7"]],
+    *,
+    smooth_weight: float = 0.01,
+    rest_prior_weight: float = 0.001,
+    pos_weight: float = 50.0,
+    ori_weight: float = 0.5,
+    limits_weight: float = 100_000.0,
+    limits_pad: float = 0.1,
+    arm: jdc.Static[Literal["left", "right"]],
+) -> Tuple[Array, Array]:
+    """Smooth a trajectory, while holding the output frames of some set of
+    joints fixed."""
+
+    Vec8Variable = jaxfg.core.RealVectorVariable[8]
+
+    timesteps, pose_dim = next(iter(pose_target_from_joint_idx.values())).shape
+    assert pose_dim == 7  # wxyz, xyz
+    qs_variables = [Vec8Variable() for _ in range(timesteps)]
+
+    factors = list[jaxfg.core.FactorBase]()
+
+    # Per-joint cost terms.
+    yumi_rest_pose = jnp.array((YUMI_REST_POSE[:7]+[YUMI_REST_POSE[14]] if arm == "right" else YUMI_REST_POSE[7:14]+[YUMI_REST_POSE[15]]))
+
+    @jdc.pytree_dataclass
+    class RegFactor(jaxfg.core.FactorBase):
+        @override
+        def compute_residual_vector(self, variable_values: tuple[Array]) -> Array:
+            (q_t,) = variable_values
+            return q_t - yumi_rest_pose
+
+    @jdc.pytree_dataclass
+    class UpperLimitFactor(jaxfg.core.FactorBase):
+        @override
+        def compute_residual_vector(self, variable_values: tuple[Array]) -> Array:
+            (q_t,) = variable_values
+            return jnp.maximum(
+                # We don't pad the gripper joint limits!
+                0.0,
+                q_t - (yumi_urdf.limits_upper.at[:7].add(-limits_pad)),
+            )
+
+    @jdc.pytree_dataclass
+    class LowerLimitFactor(jaxfg.core.FactorBase):
+        @override
+        def compute_residual_vector(self, variable_values: tuple[Array]) -> Array:
+            (q_t,) = variable_values
+            return jnp.minimum(
+                # We don't pad the gripper joint limits!
+                0.0,
+                q_t - (yumi_urdf.limits_lower.at[:7].add(limits_pad)),
+            )
+
+    for qs_var in qs_variables:
+        factors.extend(
+            [
+                RegFactor(
+                    variables=(qs_var,),
+                    noise_model=jaxfg.noises.DiagonalGaussian(
+                        jnp.ones(8) * rest_prior_weight
+                    ),
+                ),
+                UpperLimitFactor(
+                    variables=(qs_var,),
+                    noise_model=jaxfg.noises.DiagonalGaussian(
+                        jnp.ones(8) * limits_weight
+                    ),
+                ),
+                LowerLimitFactor(
+                    variables=(qs_var,),
+                    noise_model=jaxfg.noises.DiagonalGaussian(
+                        jnp.ones(8) * limits_weight
+                    ),
+                ),
+            ]
+        )
+
+    # Smoothness term.
+    @jdc.pytree_dataclass
+    class SmoothnessFactor(jaxfg.core.FactorBase):
+        @override
+        def compute_residual_vector(
+            self, variable_values: tuple[Array, Array]
+        ) -> Array:
+            (q_tm1, q_t) = variable_values
+            return q_tm1 - q_t
+
+    for i in range(1, len(qs_variables)):
+        factors.append(
+            SmoothnessFactor(
+                variables=(qs_variables[i - 1], qs_variables[i]),
+                noise_model=jaxfg.noises.DiagonalGaussian(jnp.ones(8) * smooth_weight),
+            ),
+        )
+
+    # Inverse kinematics term.
+    @jdc.pytree_dataclass
+    class InverseKinematicsFactor(jaxfg.core.FactorBase):
+        joint_index: Int[Array, ""]
+        pose_target: Float[Array, "7"]
+
+        @override
+        def compute_residual_vector(self, variable_values: tuple[Array]) -> Array:
+            (joints,) = variable_values
+            assert self.joint_index.shape == ()
+            Ts_world_joint = yumi_urdf.forward_kinematics(joints)
+            assert Ts_world_joint.shape == (yumi_urdf.num_joints, 7)
+            assert self.pose_target.shape == (7,)
+            return (
+                jaxlie.SE3(Ts_world_joint[self.joint_index]).inverse()
+                @ jaxlie.SE3(self.pose_target)
+            ).log()
+
+    ik_weight = jnp.array([pos_weight] * 3 + [ori_weight] * 3)
+    for joint_idx, pose_target in pose_target_from_joint_idx.items():
+        assert pose_target.shape == (timesteps, 7)
+        for timestep, qs_var in enumerate(qs_variables):
+            factors.append(
+                InverseKinematicsFactor(
+                    variables=(qs_var,),
+                    noise_model=jaxfg.noises.DiagonalGaussian(ik_weight),
+                    joint_index=jnp.array(joint_idx),
+                    pose_target=pose_target[timestep],
+                ),
+            )
+
+    graph = jaxfg.core.StackedFactorGraph.make(factors, use_onp=False)
+    solver = jaxfg.solvers.LevenbergMarquardtSolver(
+        lambda_initial=0.1, gradient_tolerance=1e-5, parameter_tolerance=1e-5, verbose=False
+    )
+    assignments = jaxfg.core.VariableAssignments.make_from_dict(
+        {q: yumi_rest_pose for q in qs_variables}
+    )
+    solved_assignments = solver.solve(graph, assignments)
+    out = solved_assignments.get_stacked_value(Vec8Variable)
+
+    # get whether the solved trajectory matches the target trajectory.
+    # succ = jnp.all(jnp.isclose(out, jnp.array(list(pose_target_from_joint_idx.values())), rtol=1e-2, atol=1e-2), axis=1)
+    pose = yumi_urdf.forward_kinematics(out)
+    succ = jnp.all(jnp.isclose(
+        jaxlie.SE3(pose[:, 6, :]).as_matrix(), 
+        jaxlie.SE3(jnp.array(list(pose_target_from_joint_idx.values()))[0]).as_matrix(),
+        rtol=1e-2, atol=1e-2
+    ))
+    assert out.shape == (timesteps, 8)
+    return (
+        cast(Array, out),
+        cast(Array, succ),
+    )
 
 def main(
     traj_npy: Path,

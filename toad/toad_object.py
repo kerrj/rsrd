@@ -129,7 +129,10 @@ class ToadObject:
             vertices=np.asarray(mesh.vertices),
             faces=np.asarray(mesh.triangles),
         )
-        mesh = mesh.simplify_quadric_decimation(50)
+        mesh = mesh.simplify_quadric_decimation(200)
+
+        # Smooth the mesh.
+        mesh = trimesh.smoothing.filter_mut_dif_laplacian(mesh)
 
         # Correct normals are important for grasp sampling!
         mesh.fix_normals()
@@ -313,7 +316,7 @@ class GraspableToadObject(ToadObject):
         self.__setattr__('grasps', grasp_list)
 
     @staticmethod
-    def _compute_grasps(mesh: trimesh.Trimesh, num_grasps: int = 10) -> torch.Tensor:
+    def _compute_grasps(mesh: trimesh.Trimesh, num_grasps: int = 20) -> torch.Tensor:
         """Computes grasps for a single part. It's possible that the number of grasps
         returned is less than num_grasps, if they are filtereed due to collision or other reasons (e.g., too low score).
         
@@ -415,7 +418,7 @@ class GraspableToadObject(ToadObject):
                 translation=np.array([
                     [d, 0, 0]
                     for d in (
-                        np.linspace(-0.002, 0.002, num_translations) if num_translations > 1
+                        np.linspace(-0.005, 0.005, num_translations) if num_translations > 1
                         else np.linspace(0, 0, 1)
                     )
                 ])

@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import List, Literal, Dict, Any, Union, Optional, Tuple
+from functools import partial
 
 import torch
 import numpy as np
@@ -11,6 +12,8 @@ import viser.transforms as vtf
 from viser.extras import ViserUrdf
 import trimesh.creation
 import tyro
+import yourdfpy
+from copy import deepcopy
 
 # Yumi
 from yumirws.yumi import YuMi
@@ -49,16 +52,24 @@ class YumiRobot:
     ):
         _base_dir = Path(__file__).parent.parent.parent
 
+        # Initialize the real robot.
+        # YuMi robot code must be placed before any curobo code!
+        try:
+            self.real = YuMi()
+        except:
+            print("Failed to initialize the real robot, continuing w/o it.")
+
         # Initialize the visualizer.
+        urdf_path = _base_dir / Path("data/yumi_description/urdf/yumi.urdf")
         self.vis = ViserUrdf(
-            target, _base_dir / Path("data/yumi_description/urdf/yumi.urdf")
+            target, urdf_path
         )
         # Initialize the planner.
         self.plan = YumiArmPlanner(
             minibatch_size=minibatch_size,
             table_height=TABLE_HEIGHT,
         )
-        self.plan_jax = YumiJaxPlanner(self.vis._urdf)  # ... hacky wrapper around it..
+        self.plan_jax = YumiJaxPlanner(urdf_path)  # ... hacky wrapper around it..
 
         target.scene.add_grid(
             name="grid",
@@ -68,14 +79,8 @@ class YumiRobot:
             section_size=0.05,
         )
 
-        # Initialize the real robot.
-        try:
-            self.real = YuMi()
-        except:
-            print("Failed to initialize the real robot, continuing w/o it.")
-
         # Get the tooltip-to-gripper offset. TODO remove hardcoding...
-        self.tooltip_to_gripper = vtf.SE3.from_translation(np.array([0.0, 0.0, 0.128]))
+        self.tooltip_to_gripper = vtf.SE3.from_translation(np.array([0.0, 0.0, 0.13]))
         self.home_robot()
 
     def home_robot(self):
@@ -135,15 +140,39 @@ class YumiRobot:
         q_left_arm, q_left_gripper = q_left[:7], q_left[7:]
         return torch.cat((q_right_arm, q_left_arm, q_right_gripper, q_left_gripper))
 
+    def reset_real(self):
+        """Reset the real robot, if available, and re-instanciate it."""
+        if self.real is not None:
+            del self.real
+        self.real = None
+
+        try:
+            self.real = YuMi()
+        except:
+            print("Failed to initialize the real robot, continuing w/o it.")
+
 
 def main(
-    mode: Literal["ik", "goal", "waypoint"] = "ik",
+    mode: Literal["off", "ik", "goal", "waypoint"] = "off",
     toad_object_path: Optional[Path] = None,
 ):
     server = viser.ViserServer()
     robot = YumiRobot(server, minibatch_size=(240 if mode == "goal" else 1))
 
-    if mode == "ik":
+    if mode == "off":
+        vis_spheres = server.gui.add_checkbox("Visualize Spheres", False)
+
+        robot.plan.activate_arm("left", robot.q_right)
+        sphere_frame = server.scene.add_frame("sphere", visible=False)
+        spheres = robot.plan.get_robot_as_spheres(robot.q_left)
+        for i, sphere in enumerate(spheres):
+            server.scene.add_mesh_trimesh(f"sphere/sphere_{i}", sphere)
+
+        @vis_spheres.on_update
+        def _(_):
+            sphere_frame.visible = vis_spheres.value
+
+    elif mode == "ik":
         is_collide_world = server.gui.add_checkbox("Collide (world)", False, disabled=True)
         is_collide_self = server.gui.add_checkbox("Collide (self)", False, disabled=True)
 
@@ -223,6 +252,20 @@ def main(
         robot.plan.activate_arm("right", robot.q_left)
         active_arm_handle.value = "right"
         update_joints()
+
+        real_button = server.gui.add_button("Move real robot", disabled=(robot.real is None))
+        @real_button.on_click
+        def _(_):
+            assert robot.real is not None
+            real_button.disabled = True
+            robot.real.move_joints_sync(
+                l_joints=robot.q_left[:7].cpu().numpy().astype(np.float64),
+                r_joints=robot.q_right[:7].cpu().numpy().astype(np.float64),
+                speed=REAL_ROBOT_SPEED
+            )
+            robot.real.left.sync()
+            robot.real.right.sync()
+            real_button.disabled = False
 
     elif mode == "goal":
         cube = trimesh.creation.box((0.03, 0.03, 0.03))
@@ -404,7 +447,7 @@ def main(
             @handle.on_click
             def _(_):
                 container_handle = server.scene.add_3d_gui_container(
-                    f"camera/object/group_{idx}/container",
+                    f"obj/{idx}/container",
                 )
                 with container_handle:
                     anchor_button = server.gui.add_button("Anchor")
@@ -447,6 +490,7 @@ def main(
             robot.home_robot()
 
         goal_button = server.gui.add_button("Move to goal")
+        real_button = server.gui.add_button("Move real robot")
 
         traj, traj_handle, play_handle = None, None, None
         @goal_button.on_click
@@ -461,7 +505,7 @@ def main(
             except:
                 pass
 
-            if len(mesh_list) > 1 and (part_handle.value == -1 or anchor_handle.value == -1):
+            if len(mesh_list) > 1 and (part_handle.value == -1):
                 print("Please select a part and an anchor.")
                 goal_button.disabled = False
                 return
@@ -502,80 +546,8 @@ def main(
                 return
             assert isinstance(moving_js, torch.Tensor) and isinstance(moving_success, torch.Tensor)
 
-            d_world, d_self = robot.plan.in_collision(moving_js)
-            moving_success = moving_success & (d_world <= 0.01)
-
             if not moving_success.any():
                 print("IK solution is invalid (moving).")
-                goal_button.disabled = False
-                return
-
-            # Get the grasp path for the anchor part.
-            moving_grasp = toad_obj.grasps[anchor_handle.value]
-            moving_grasps_gripper = toad_obj.to_gripper_frame(moving_grasp)
-            anchor_grasp_path_wxyz_xyz = torch.cat([
-                torch.Tensor(
-                    obj_tf_vtf.multiply(
-                        vtf.SE3(keyframes[keyframe_idx, part_handle.value, :].flatten().cpu().numpy())
-                    )
-                    .multiply(moving_grasps_gripper)
-                    .wxyz_xyz
-                ).unsqueeze(1)  # [num_grasps, 7] -> [num_grasps, 1, 7]
-                for keyframe_idx in range(len(keyframes))
-            ], dim=1).float().cuda() # [num_grasps, num_keyframes, 7]
-
-            batch_size = anchor_grasp_path_wxyz_xyz.shape[0]
-            if plan_dropdown.value == "left":
-                robot.plan.activate_arm("right", robot.q_left)
-            else:
-                robot.plan.activate_arm("left", robot.q_right)
-            anchor_js, anchor_success = robot.plan.ik(
-                goal_wxyz_xyz=anchor_grasp_path_wxyz_xyz[:, 0, :],
-                q_init=robot.q_left.expand(batch_size, -1),
-            )
-            if anchor_js is None:
-                print("Failed to solve IK (anchor).")
-                goal_button.disabled = False
-                return
-            assert isinstance(anchor_js, torch.Tensor) and isinstance(anchor_success, torch.Tensor)
-
-            d_world, d_self = robot.plan.in_collision(anchor_js)
-            anchor_success = anchor_success & (d_world <= 0.01)
-
-            if not anchor_success.any():
-                print("IK solution is invalid (anchor).")
-                goal_button.disabled = False
-                return
-            if not (moving_success & anchor_success).any():
-                print("No valid IK solutions.")
-                goal_button.disabled = False
-                return
-
-            # Heuristic: best anchor must be:
-            # 1) wrist angled outwards
-            # 2) successful IK.
-            # 3) find the list of anchors that *don't* collide with the motions. TODO
-            anchor_gripper_wxyz = anchor_grasp_path_wxyz_xyz[:, 0, :4]  # [num_grasps, 4]
-            anchor_gripper_mat = vtf.SO3(wxyz=anchor_gripper_wxyz.cpu().numpy()).as_matrix()  # [num_grasps, 3, 3]
-            anchor_gripper_angle_z = anchor_gripper_mat[:, 1, 2].tolist()  # i.e., y-component of the z direction in world coords.
-            if plan_dropdown.value == "left":
-                # right arm anchor --> wrist z should point towards y.
-                anchor_best_idx = sorted([_ for _ in range(len(anchor_gripper_wxyz))], key=lambda i: anchor_gripper_angle_z[i], reverse=True)
-            else:
-                # left arm anchor --> wrist z should point towards -y.
-                anchor_best_idx = sorted([_ for _ in range(len(anchor_gripper_wxyz))], key=lambda i: anchor_gripper_angle_z[i], reverse=False)
-            anchor_avoid_collide = (robot.plan.in_collision(anchor_js)[0] <= 0)
-            anchor_valid = torch.where(anchor_success & anchor_avoid_collide)[0]
-            if len(anchor_valid) == 0:
-                print("No valid anchor joints (fail, or collides with the world).")
-                goal_button.disabled = False
-            best_anchor_idx = -1
-            for i in range(len(anchor_best_idx)):
-                if anchor_best_idx[i] in anchor_valid:
-                    best_anchor_idx = anchor_best_idx[i]
-                    break
-            if best_anchor_idx == -1:
-                print("No valid anchor joints.")
                 goal_button.disabled = False
                 return
 
@@ -593,36 +565,22 @@ def main(
                 for keyframe_idx in range(len(keyframes))
             ], dim=1).float().cuda() # [num_grasps, num_keyframes, 7]
 
-            moving_grasp = toad_obj.grasps[anchor_handle.value]
-            moving_grasps_gripper = toad_obj.to_gripper_frame(moving_grasp, robot.tooltip_to_gripper)
-            anchor_grasp_path_wxyz_xyz = torch.cat([
-                torch.Tensor(
-                    obj_tf_vtf.multiply(
-                        vtf.SE3(keyframes[keyframe_idx, anchor_handle.value, :].flatten().cpu().numpy())
-                    )
-                    .multiply(moving_grasps_gripper)
-                    .wxyz_xyz
-                ).unsqueeze(1)  # [num_grasps, 7] -> [num_grasps, 1, 7]
-                for keyframe_idx in range(len(keyframes))
-            ], dim=1).float().cuda() # [num_grasps, num_keyframes, 7]
-            anchor_grasp_path_wxyz_xyz = anchor_grasp_path_wxyz_xyz[best_anchor_idx].unsqueeze(0).expand(moving_grasp_path_wxyz_xyz.shape[0], -1, -1)
+            # if plan_dropdown.value == "left":
+            traj, succ = robot.plan_jax.plan_from_waypoints(
+                poses=moving_grasp_path_wxyz_xyz[moving_success],
+                arm=plan_dropdown.value,
+            )
 
-            if plan_dropdown.value == "left":
-                traj = robot.plan_jax.plan_from_waypoints(
-                    left_poses=moving_grasp_path_wxyz_xyz[moving_success & anchor_success],
-                    right_poses=anchor_grasp_path_wxyz_xyz[moving_success & anchor_success],
-                )
-            else:
-                traj = robot.plan_jax.plan_from_waypoints(
-                    left_poses=anchor_grasp_path_wxyz_xyz[moving_success & anchor_success],
-                    right_poses=moving_grasp_path_wxyz_xyz[moving_success & anchor_success],
-                )
-
-            assert len(traj.shape) == 3 and traj.shape[-1] == 16
+            assert len(traj.shape) == 3 and traj.shape[-1] == 8
+            if not succ.any():
+                print("Failed to generate a valid trajectory.")
+                goal_button.disabled = False
+                return
             goal_button.disabled = False
 
             # Override the gripper width, for both arms.
-            traj[..., 14:] = 0.025
+            traj[..., 7:] = 0.025
+            traj = traj[succ]
 
             traj_handle = server.gui.add_slider("Trajectory Index", 0, len(traj) - 1, 1, 0)
             play_handle = server.gui.add_slider("play", min=0, max=traj.shape[1]-1, step=1, initial_value=0)
@@ -630,7 +588,11 @@ def main(
             def move_to_traj_position():
                 assert traj is not None and traj_handle is not None and play_handle is not None
                 assert isinstance(traj, torch.Tensor)
-                robot.q_all = traj[traj_handle.value][play_handle.value].view(-1)
+                if plan_dropdown.value == "left":
+                    robot.q_left = traj[traj_handle.value][play_handle.value].view(-1)
+                else:
+                    robot.q_right = traj[traj_handle.value][play_handle.value].view(-1)
+                # robot.q_all = traj[traj_handle.value][play_handle.value].view(-1)
                 update_keyframe(play_handle.value)
 
             @traj_handle.on_update
@@ -641,6 +603,27 @@ def main(
                 move_to_traj_position()
 
             move_to_traj_position()
+
+            @real_button.on_click
+            def _(_):
+                if robot.real is None:
+                    print("Real robot is not available.")
+                    return
+                if traj is None or traj_handle is None or play_handle is None:
+                    print("No trajectory available.")
+                    return
+                if plan_dropdown.value == "left":
+                    robot.real.left.move_joints_traj(
+                        joints=traj[traj_handle.value][..., :7].cpu().numpy().astype(np.float64),
+                        speed=REAL_ROBOT_SPEED
+                    )
+                    robot.real.left.sync()
+                if plan_dropdown.value == "right":
+                    robot.real.right.move_joints_traj(
+                        joints=traj[traj_handle.value][..., :7].cpu().numpy().astype(np.float64),
+                        speed=REAL_ROBOT_SPEED
+                    )
+                    robot.real.right.sync()
 
 
     while True:
