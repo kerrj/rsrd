@@ -47,7 +47,7 @@ def register_zed():
     sx = 6
     sy = 4
     zed = Zed()
-    cb_trans = [0.025*16, 0, 0.003-0.005-0.001] # 16 * 25 mm, and 
+    cb_trans = [0.025*20, 0, 0.003-0.005-0.001] # 20 * 25 mm, and 
     R = vtf.SO3.from_z_radians(np.pi).as_matrix()
     H_chess_world = RigidTransform(R,cb_trans,from_frame='cb',to_frame='world')
     while True:
