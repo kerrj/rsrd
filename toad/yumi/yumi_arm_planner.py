@@ -53,6 +53,24 @@ YUMI_REST_POSE_RIGHT = {
     "yumi_joint_6_r": -2.42181893,
     "gripper_r_joint": 0.025,
 }
+YUMI_REST_POSE = {
+    "yumi_joint_1_r": 1.21442839,
+    "yumi_joint_2_r": -1.03205606,
+    "yumi_joint_7_r": -1.10072738,
+    "yumi_joint_3_r": 0.2987352,
+    "yumi_joint_4_r": -1.85257716,
+    "yumi_joint_5_r": 1.25363652,
+    "yumi_joint_6_r": -2.42181893,
+    "yumi_joint_1_l": -1.24839656,
+    "yumi_joint_2_l": -1.09802876,
+    "yumi_joint_7_l": 1.06634394,
+    "yumi_joint_3_l": 0.31386161,
+    "yumi_joint_4_l": 1.90125141,
+    "yumi_joint_5_l": 1.3205139,
+    "yumi_joint_6_l": 2.43563939,
+    "gripper_r_joint": 0.025,
+    "gripper_l_joint": 0.025,
+}
 
 
 class YumiArmPlanner:
@@ -67,6 +85,8 @@ class YumiArmPlanner:
     """Convenience object to store tensor type and device, for curobo."""
     _robot_world: RobotWorld
     """The robot world object, which contains the robot model and the world model (collision, etc)."""
+    _robot_world_full: RobotWorld
+    """(14 / 16 dof) robot world obj, for checking both arms for collision."""
     _ik_solver:IKSolver
     """The inverse kinematics solver object."""
     _motion_gen: MotionGen
@@ -113,6 +133,15 @@ class YumiArmPlanner:
         self._robot_world = RobotWorld(_robot_world_cfg)
         assert isinstance(self._robot_world.world_model, WorldCollision)
 
+        _robot_cfg_full = self.create_cfg_full(freeze_gripper=self._freeze_gripper)
+        _robot_world_cfg_full = RobotWorldConfig.load_from_config(
+            robot_config=_robot_cfg_full,
+            world_model=world_config,
+            tensor_args=self._tensor_args,
+            collision_activation_distance=0.01,
+        )
+        self._robot_world_full = RobotWorld(_robot_world_cfg_full)
+
         ik_config = IKSolverConfig.load_from_robot_config(
             robot_cfg,
             None,
@@ -139,7 +168,7 @@ class YumiArmPlanner:
             interpolation_dt=0.25,
             trajopt_dt=0.25,
             collision_activation_distance=0.005,  # keeping this small is important, because gripper balls interfere w/ opt.
-            interpolation_steps=30,
+            interpolation_steps=50,
             world_coll_checker=self._robot_world.world_model,
             self_collision_check=True,
             self_collision_opt=True,
@@ -198,6 +227,43 @@ class YumiArmPlanner:
             cfg_file["robot_cfg"]["kinematics"]["cspace"]["retract_config"] = list(active_poses.values())
             cfg_file["robot_cfg"]["kinematics"]["cspace"]["null_space_weight"] = [1]*8
             cfg_file["robot_cfg"]["kinematics"]["cspace"]["cspace_distance_weight"] = [1]*8
+
+        robot_cfg = RobotConfig.from_dict(cfg_file, self._tensor_args)
+        return robot_cfg
+
+    def create_cfg_full(
+        self,
+        freeze_gripper: bool = True,
+    ):
+        # Create the robot model.
+        cfg_file = load_yaml(join_path(self._base_dir, f"data/yumi.yml"))
+        cfg_file["robot_cfg"]["kinematics"]["external_robot_configs_path"] = self._base_dir
+        cfg_file["robot_cfg"]["kinematics"]["external_asset_path"] = self._base_dir
+
+        # lock the joints of the other side, as well as the gripper joint!
+        # If locking joint pos is provided, use that. Otherwise, lock at the rest pose.
+        cfg_file["robot_cfg"]["kinematics"]["ee_link"] = "right_dummy_point"  # ordering affects joints.
+
+        poses = deepcopy(YUMI_REST_POSE)
+
+        if freeze_gripper:
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["joint_names"] = list(poses.keys())[:-2]
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["retract_config"] = list(poses.values())[:-2]
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["null_space_weight"] = [1]*14
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["cspace_distance_weight"] = [1]*14
+
+            # Add gripper to the lock joints.
+            cfg_file["robot_cfg"]["kinematics"]["lock_joints"][
+                list(poses.keys())[-2]
+            ] = poses[list(poses.keys())[-2]]
+            cfg_file["robot_cfg"]["kinematics"]["lock_joints"][
+                list(poses.keys())[-1]
+            ] = poses[list(poses.keys())[-1]]
+        else:
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["joint_names"] = list(poses.keys())
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["retract_config"] = list(poses.values())
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["null_space_weight"] = [1]*16
+            cfg_file["robot_cfg"]["kinematics"]["cspace"]["cspace_distance_weight"] = [1]*16
 
         robot_cfg = RobotConfig.from_dict(cfg_file, self._tensor_args)
         return robot_cfg
@@ -476,7 +542,6 @@ class YumiArmPlanner:
         assert q.shape == (batch_size, tsteps, 8) and succ.shape == torch.Size([batch_size])
         return (q, succ)
 
-
     @staticmethod
     def createTableWorld(table_height):
         """Create a simple world with a table, with the top surface at z={table_height}."""
@@ -506,19 +571,22 @@ class YumiArmPlanner:
         # Need to clear the world cache, as per in: https://github.com/NVlabs/curobo/issues/263.
         self._robot_world.clear_world_cache()
         self._robot_world.update_world(world_config)
+        self._robot_world_full.clear_world_cache()
+        self._robot_world_full.update_world(world_config)
 
-    def update_world_objects(self, objects: Union[List[Sphere], List[Mesh]]):
+    def update_world_objects(self, objects: Optional[Union[List[Sphere], List[Mesh]]] = None):
         """Update the world objects -- reinstantiates the world table, too."""
         # Need to clear the world cache, as per in: https://github.com/NVlabs/curobo/issues/263.
         world_config = self.createTableWorld(self.table_height)
         assert isinstance(world_config.mesh, list) and isinstance(world_config.sphere, list)
-        for obj in objects:
-            if isinstance(obj, Sphere):
-                world_config.sphere.append(obj)
-            elif isinstance(obj, Mesh):
-                world_config.mesh.append(obj)
-            else:
-                raise ValueError(f"Unsupported object type., {type(objects[0])}")
+        if objects is not None:
+            for obj in objects:
+                if isinstance(obj, Sphere):
+                    world_config.sphere.append(obj)
+                elif isinstance(obj, Mesh):
+                    world_config.mesh.append(obj)
+                else:
+                    raise ValueError(f"Unsupported object type., {type(objects[0])}")
         self.update_world(world_config)
 
     def in_collision(self, q: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -533,6 +601,16 @@ class YumiArmPlanner:
             q = q.unsqueeze(1)
         assert len(q.shape) == 3
         d_world, d_self = self._robot_world.get_world_self_collision_distance_from_joint_trajectory(q)
+
+        return (d_world.squeeze(), d_self.squeeze())
+
+    def in_collision_full(self, q: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if len(q.shape) == 1:
+            q = q.unsqueeze(0).unsqueeze(0)
+        elif len(q.shape) == 2:
+            q = q.unsqueeze(1)
+        assert len(q.shape) == 3
+        d_world, d_self = self._robot_world_full.get_world_self_collision_distance_from_joint_trajectory(q)
 
         return (d_world.squeeze(), d_self.squeeze())
 

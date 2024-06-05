@@ -160,7 +160,7 @@ class ToadOptimizer:
         Also updates `initialized` to `True`."""
         # retval only matters for visualization
         start = time.time()
-        xs, ys, outputs, renders = self.optimizer.initialize_obj_pose(render=True)
+        xs, ys, outputs, renders = self.optimizer.initialize_obj_pose(render=True,metric_depth=True)
         print(f"Time taken for init (pose opt): {time.time() - start:.2f} s")
 
         start = time.time()

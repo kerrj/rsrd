@@ -225,7 +225,7 @@ class RigidGroupOptimizer:
             )
             whole_pose_adj = start_pose_adj.detach().clone()
             whole_pose_adj = torch.nn.Parameter(whole_pose_adj)
-            optimizer = torch.optim.Adam([whole_pose_adj], lr=0.01)
+            optimizer = torch.optim.Adam([whole_pose_adj], lr=0.005)
             for i in range(niter):
                 with torch.no_grad():
                     whole_pose_adj[:, 3:] = whole_pose_adj[:, 3:] / whole_pose_adj[
@@ -337,7 +337,7 @@ class RigidGroupOptimizer:
                 best_loss = loss
                 best_outputs = dig_outputs
                 best_pose = final_pose
-        _,_,best_pose = try_opt(best_pose,150,depth=True)
+        _,_,best_pose = try_opt(best_pose,200,depth=True)
         self.reset_transforms()
         with self.render_lock:
             self.apply_to_model(

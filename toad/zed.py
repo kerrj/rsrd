@@ -182,11 +182,13 @@ class Zed():
         return (points, colors)
 
 
-if __name__ == "__main__":
+import tyro
+def main(name: str) -> None:
+
     import torch
     from viser import ViserServer
     zed = Zed()
-    zed.start_record("/home/chungmin/Documents/please2/toad/motion_vids/redbox_moving2.svo2")
+    zed.start_record(f"/home/chungmin/Documents/please2/toad/motion_vids/{name}.svo2")
     import os
     # os.makedirs(out_dir,exist_ok=True)
     i = 0
@@ -265,3 +267,6 @@ if __name__ == "__main__":
     #     points = (local_dirs * depth.reshape(-1,1)).astype(np.float32)
     #     points = points.reshape(-1,3)
     #     v.add_point_cloud("points", points = points.reshape(-1,3), colors=left.reshape(-1,3),point_size=.001)
+
+if __name__ == "__main__":
+    tyro.cli(main)

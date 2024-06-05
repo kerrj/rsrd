@@ -45,6 +45,9 @@ class YumiRobot:
     _q_right: torch.Tensor
     """The current joint configuration of the right arm, (8,) including gripper."""
 
+    q_right_home: torch.Tensor = torch.Tensor(list(YUMI_REST_POSE_RIGHT.values()))
+    q_left_home: torch.Tensor = torch.Tensor(list(YUMI_REST_POSE_LEFT.values()))
+
     def __init__(
         self,
         target: Union[viser.ViserServer, viser.ClientHandle],
@@ -135,10 +138,15 @@ class YumiRobot:
     @staticmethod
     def concat_joints(q_right: torch.Tensor, q_left: torch.Tensor) -> torch.Tensor:
         """Concatenate the left and right joint configurations."""
-        assert q_right.shape == q_left.shape == (8,), "Invalid joint shapes -- expected (8,), but got {} and {}.".format(q_right.shape, q_left.shape)
-        q_right_arm, q_right_gripper = q_right[:7], q_right[7:]
-        q_left_arm, q_left_gripper = q_left[:7], q_left[7:]
-        return torch.cat((q_right_arm, q_left_arm, q_right_gripper, q_left_gripper))
+        # assert q_right.shape == q_left.shape == (8,), "Invalid joint shapes -- expected (8,), but got {} and {}.".format(q_right.shape, q_left.shape)
+        # q_right_arm, q_right_gripper = q_right[:7], q_right[7:]
+        # q_left_arm, q_left_gripper = q_left[:7], q_left[7:]
+        # return torch.cat((q_right_arm, q_left_arm, q_right_gripper, q_left_gripper))
+
+        assert q_right.shape[-1] == q_left.shape[-1] == 8, "Invalid joint shapes -- expected (..., 8), but got {} and {}.".format(q_right.shape, q_left.shape)
+        q_right_arm, q_right_gripper = q_right[..., :7], q_right[..., 7:]
+        q_left_arm, q_left_gripper = q_left[..., :7], q_left[..., 7:]
+        return torch.cat((q_right_arm, q_left_arm, q_right_gripper, q_left_gripper), dim=-1)
 
     def reset_real(self):
         """Reset the real robot, if available, and re-instanciate it."""

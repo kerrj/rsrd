@@ -133,11 +133,11 @@ class ToadObject:
         # Smooth the mesh.
         # Purposely turn volume_constraint off, so that the mesh can... shrink.
         mesh = trimesh.smoothing.filter_mut_dif_laplacian(
-            mesh, lamb=0.2, iterations=200, volume_constraint=False
+            mesh, lamb=0.2, iterations=200, # volume_constraint=False
         )
 
         # Simplify the mesh.
-        mesh = mesh.simplify_quadric_decimation(200)
+        mesh = mesh.simplify_quadric_decimation(200)  # This affects speed by a lot!
 
         # Correct normals are important for grasp sampling!
         mesh.fix_normals()
