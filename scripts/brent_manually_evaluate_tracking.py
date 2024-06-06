@@ -31,11 +31,12 @@ def main(output_dir: Path) -> None:
         "zed_cam_k",
     }, zed_data.keys()
 
+    gaussian_path = list(output_dir.glob("*.pt"))
+    assert len(gaussian_path) == 1
+    gaussian_path = gaussian_path[0]
     splat_data = {
         k: v.numpy(force=True)
-        for k, v in torch.load(
-            output_dir / "object_gaussians.pt", map_location="cpu"
-        ).items()
+        for k, v in torch.load(gaussian_path, map_location="cpu").items()
     }
     assert splat_data.keys() == {
         "features_dc",
@@ -73,7 +74,7 @@ def main(output_dir: Path) -> None:
     server = viser.ViserServer()
     part_offset_control = server.scene.add_transform_controls(
         "/object/part/part_offset",
-        depth_test=False,
+        depth_test=True,
         scale=0.05,
     )
     means_wrt_part: np.ndarray | None = None
