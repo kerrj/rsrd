@@ -662,7 +662,10 @@ class RigidGroupOptimizer:
                     means = self.dig_model.gauss_params["means"][group_mask].detach()
                     # compute nearest neighbor distance from index finger to the gaussians
                     finger_position = h.vertices[349]
-                    closest_dist = (means - torch.from_numpy(np.array(finger_position)).cuda()).norm(dim=1).min().item()
+                    thumb_position = h.vertices[745]
+                    finger_dist = (means - torch.from_numpy(np.array(finger_position)).cuda()).norm(dim=1).min().item()
+                    thumb_dist = (means - torch.from_numpy(np.array(thumb_position)).cuda()).norm(dim=1).min().item()
+                    closest_dist = (finger_dist + thumb_dist)/2
                     sum_part_dists[g] += closest_dist
         ids = list(range(len(self.group_masks)))
         zipped = list(zip(ids,sum_part_dists))
@@ -691,7 +694,10 @@ class RigidGroupOptimizer:
                     means = self.dig_model.gauss_params["means"][group_mask].detach()
                     # compute nearest neighbor distance from index finger to the gaussians
                     finger_position = h.vertices[349]
-                    closest_dist = (means - torch.from_numpy(np.array(finger_position)).cuda()).norm(dim=1).min()
+                    thumb_position = h.vertices[745]
+                    finger_dist = (means - torch.from_numpy(np.array(finger_position)).cuda()).norm(dim=1).min().item()
+                    thumb_dist = (means - torch.from_numpy(np.array(thumb_position)).cuda()).norm(dim=1).min().item()
+                    closest_dist = (finger_dist + thumb_dist)/2
                     if self.hand_lefts[frame_id][h_id]:
                         left_part_dists[frame_id,g] = closest_dist
                     else:
