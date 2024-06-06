@@ -8,6 +8,7 @@ from yourdfpy import URDF
 from lxml import etree
 from pathlib import Path
 from copy import deepcopy
+import tqdm
 
 from toad.yumi.brent_jax_trajsmooth import JaxUrdf, motion_plan_yumi_arm
 from toad.yumi.yumi_arm_planner import YUMI_REST_POSE_LEFT, YUMI_REST_POSE_RIGHT
@@ -63,7 +64,7 @@ class YumiJaxPlanner:
         device = poses.device
         urdf = self.jax_urdf_right if arm == "right" else self.jax_urdf_left
 
-        for i in range(poses.shape[0]):
+        for i in tqdm.trange(poses.shape[0], desc="Waypoint opt"):
             # smooth the poses first.
             mat = vtf.SE3(poses[i].cpu().numpy()).as_matrix()  # (timesteps, 4, 4)
             _mat = mat.copy()
