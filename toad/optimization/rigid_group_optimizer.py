@@ -28,6 +28,7 @@ from toad.optimization.atap_loss import ATAPLoss
 from toad.utils import *
 import viser.transforms as vtf
 import trimesh
+from typing import Tuple
 
 def quatmul(q0: torch.Tensor, q1: torch.Tensor):
     w0, x0, y0, z0 = torch.unbind(q0, dim=-1)
@@ -123,8 +124,9 @@ class RigidGroupOptimizer:
     use_atap: bool = True
     pose_lr: float = 0.005
     pose_lr_final: float = 0.0005
-    mask_hands: bool = False
+    mask_hands: bool = True
     use_roi: bool = False
+    use_optical_flow: bool = False
 
     init_p2o: torch.Tensor
     """From: part, To: object. in current world frame. Part frame is centered at part centroid, and object frame is centered at object centroid."""
@@ -147,6 +149,7 @@ class RigidGroupOptimizer:
         self.dataset_scale = dataset_scale
         self.tape = None
         self.is_initialized = False
+        self.hand_lefts = []#list of bools for each hand frame
         self.dig_model = dig_model
         # detach all the params to avoid retain_graph issue
         self.dig_model.gauss_params["means"] = self.dig_model.gauss_params[
@@ -272,7 +275,7 @@ class RigidGroupOptimizer:
                             object_mask.squeeze().unsqueeze(0).unsqueeze(0).float(), torch.ones((self.rank_loss_erode, self.rank_loss_erode), device='cuda')
                         ).squeeze().bool()
                         if self.mask_hands:
-                            object_mask = object_mask & self.hand_mask.unsqueeze(-1)
+                            object_mask = object_mask & self.hand_mask
                         valid_ids = torch.where(object_mask)
                         rand_samples = torch.randint(
                             0, valid_ids[0].shape[0], (N,), device="cuda"
@@ -337,7 +340,7 @@ class RigidGroupOptimizer:
                 best_loss = loss
                 best_outputs = dig_outputs
                 best_pose = final_pose
-        _,_,best_pose = try_opt(best_pose,150,depth=True)
+        _,_,best_pose = try_opt(best_pose, 50, depth=True)
         self.reset_transforms()
         with self.render_lock:
             self.apply_to_model(
@@ -430,6 +433,39 @@ class RigidGroupOptimizer:
             )
         ).get_scheduler(self.optimizer, self.pose_lr)
         roi_cam = self.get_ROI_cam(self.get_ROI()) if self.use_roi else self.init_c2o
+        if self.use_optical_flow:
+            prev_frame_pose_deltas = self.pose_deltas.detach().clone()
+            N_flow = 10000
+            with torch.no_grad(),self.render_lock:
+                self.dig_model.eval()
+                self.apply_to_model(
+                    self.pose_deltas, self.centroids, self.group_labels
+                )
+                before_outputs = self.dig_model.get_outputs(roi_cam)
+            #first render a start frame, deproject points, get their in world space
+            valid_ids = torch.where(before_outputs['accumulation']>.8)
+            rand_samples = torch.randint(
+                0, valid_ids[0].shape[0], (N_flow,), device="cuda"
+            )
+            flow_sample_coords = (
+                valid_ids[0][rand_samples], # y
+                valid_ids[1][rand_samples], # x
+            )
+            sample_depth = before_outputs['depth'][flow_sample_coords]
+            sample_homog_rays = torch.cat([flow_sample_coords[1][...,None],flow_sample_coords[0][...,None],torch.ones_like(flow_sample_coords[0][...,None])],dim=1).float()
+            sample_rays = roi_cam.get_intrinsics_matrices()[0].inverse().cuda().matmul(sample_homog_rays.t()).t()
+            pts_cam = sample_rays * sample_depth
+            c2w = torch.cat([roi_cam.camera_to_worlds[0],torch.tensor([0,0,0,1],device='cuda').view(1,4)],dim=0)
+            pts_world = c2w.matmul(torch.cat([pts_cam,torch.ones_like(pts_cam[:,0:1])],dim=1).t()).t()[:,:3]
+            import pdb;pdb.set_trace()
+            # compute the nearest neighbor gaussian for each point
+            from cuml.neighbors import NearestNeighbors
+            model = NearestNeighbors(n_neighbors=1)
+            means = self.dig_model.means.detach().cpu().numpy()
+            model.fit(means)
+            _, match_ids = model.kneighbors(pts_world)
+            match_ids = torch.tensor(match_ids,dtype=torch.long,device='cuda')
+            point_clusters = self.group_labels[match_ids]
         for i in range(niter):
             # renormalize rotation representation
             with torch.no_grad():
@@ -457,7 +493,7 @@ class RigidGroupOptimizer:
                 .permute(1, 2, 0)
             )
             if self.mask_hands:
-                pix_loss = (self.frame_pca_feats - dino_feats)[self.hand_mask].norm(dim=-1)
+                mse_loss = (self.frame_pca_feats - dino_feats)[self.hand_mask].norm(dim=-1)
             else:
                 mse_loss = (self.frame_pca_feats - dino_feats).norm(dim=-1)
             # THIS IS BAD WE NEED TO FIX THIS (because resizing makes the image very slightly misaligned)
@@ -484,7 +520,7 @@ class RigidGroupOptimizer:
                         object_mask.squeeze().unsqueeze(0).unsqueeze(0).float(), torch.ones((self.rank_loss_erode, self.rank_loss_erode), device='cuda')
                     ).squeeze().bool()
                     if self.mask_hands:
-                        object_mask = object_mask & self.hand_mask.unsqueeze(-1)
+                        object_mask = object_mask & self.hand_mask
                     valid_ids = torch.where(object_mask)
                     rand_samples = torch.randint(
                         0, valid_ids[0].shape[0], (N,), device="cuda"
@@ -504,6 +540,8 @@ class RigidGroupOptimizer:
                 with tape:
                     atap_loss = self.atap(weights)
                 loss = loss + atap_loss
+            if self.use_optical_flow:
+                transforms_to_apply = torch.eye(4,device='cuda').unsqueeze(0).repeat(N_flow,1,1)
             loss.backward()
             tape.backward()
             self.optimizer.step()
@@ -554,11 +592,14 @@ class RigidGroupOptimizer:
         # hand vertices are given in world coordinates
         w2o = self.get_registered_o2w().inverse().cpu().numpy()
         all_hands = lhands + rhands
+        is_lefts = [True]*len(lhands) + [False]*len(rhands)
         if len(all_hands)>0:
             all_hands = [hand.apply_transform(w2o) for hand in all_hands]
             self.hand_frames.append(all_hands)
+            self.hand_lefts.append(is_lefts)
         else:
             self.hand_frames.append([])
+            self.hand_lefts.append([])
 
         partdeltas = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
         for i in range(len(self.group_masks)):
@@ -587,7 +628,8 @@ class RigidGroupOptimizer:
         """
         torch.save({
             "keyframes": self.keyframes,
-            "hand_frames": self.hand_frames
+            "hand_frames": self.hand_frames,
+            "hand_lefts": self.hand_lefts
         }, path)
 
     def load_trajectory(self, path: Path):
@@ -597,7 +639,74 @@ class RigidGroupOptimizer:
         data = torch.load(path)
         self.keyframes = [d.cuda() for d in data["keyframes"]]
         self.hand_frames = data['hand_frames']
-        
+        self.hand_lefts = data['hand_lefts']
+    
+    
+    def compute_single_hand_assignment(self) -> List[int]:
+        """
+        returns the group index closest to the hand
+
+        list of increasing distance. list[0], list[1] second best etc
+        """
+        sum_part_dists = [0]*len(self.group_masks)
+        for frame_id,hands in enumerate(self.hand_frames):
+            if len(hands) == 0:
+                continue
+            self.apply_keyframe(frame_id)
+            for h_id,h in enumerate(hands):
+                h = h.copy()
+                h.apply_transform(self.get_registered_o2w().cpu().numpy())
+                # compute distance to fingertips for each group
+                for g in range(len(self.group_masks)):
+                    group_mask = self.group_masks[g]
+                    means = self.dig_model.gauss_params["means"][group_mask].detach()
+                    # compute nearest neighbor distance from index finger to the gaussians
+                    finger_position = h.vertices[349]
+                    closest_dist = (means - torch.from_numpy(np.array(finger_position)).cuda()).norm(dim=1).min().item()
+                    sum_part_dists[g] += closest_dist
+        ids = list(range(len(self.group_masks)))
+        zipped = list(zip(ids,sum_part_dists))
+        zipped.sort(key=lambda x: x[1])
+        return [z[0] for z in zipped]
+
+
+    def compute_two_hand_assignment(self) -> List[Tuple[int,int]]:
+        """
+        tuple of left_group_id, right_group_id
+        list of increasing distance. list[0], list[1] second best etc
+        """
+        # store KxG tensors storing the minimum distance to left, right hands at each frame
+        left_part_dists = torch.zeros(len(self.hand_frames), len(self.group_masks),device='cuda')
+        right_part_dists = torch.zeros(len(self.hand_frames), len(self.group_masks),device='cuda')
+        for frame_id,hands in enumerate(self.hand_frames):
+            if len(hands) == 0:
+                continue
+            self.apply_keyframe(frame_id)
+            for h_id,h in enumerate(hands):
+                h = h.copy()
+                h.apply_transform(self.get_registered_o2w().cpu().numpy())
+                # compute distance to fingertips for each group
+                for g in range(len(self.group_masks)):
+                    group_mask = self.group_masks[g]
+                    means = self.dig_model.gauss_params["means"][group_mask].detach()
+                    # compute nearest neighbor distance from index finger to the gaussians
+                    finger_position = h.vertices[349]
+                    closest_dist = (means - torch.from_numpy(np.array(finger_position)).cuda()).norm(dim=1).min()
+                    if self.hand_lefts[frame_id][h_id]:
+                        left_part_dists[frame_id,g] = closest_dist
+                    else:
+                        right_part_dists[frame_id,g] = closest_dist
+        # Next brute force all hand-part assignments and pick the best one
+        assignments = []
+        for li in range(len(self.group_masks)):
+            for ri in range(len(self.group_masks)):
+                if li == ri:
+                    continue
+                dist = left_part_dists[:,li].sum() + right_part_dists[:,ri].sum()
+                assignments.append((li,ri,dist))
+        assignments.sort(key=lambda x: x[2])
+        return [(a[0],a[1]) for a in assignments]
+
     def reset_transforms(self):
         with torch.no_grad():
             self.dig_model.gauss_params["means"] = self.init_means.detach().clone()
