@@ -1,3 +1,7 @@
+"""Requires the `brent/splatting` branch of viser:
+
+pip install git+ssh://git@github.com/nerfstudio-project/viser.git@brent/splatting
+"""
 from pathlib import Path
 
 import numpy as np
