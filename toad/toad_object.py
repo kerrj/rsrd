@@ -14,6 +14,14 @@ import pickle as pkl
 
 from curobo.geom.types import Mesh, Sphere
 
+MANO_INDICES = [
+    745,  # thumb
+    349,  # index
+    429,  # middle
+    554,  # ring
+    692,  # pinky
+]
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ToadObject:
@@ -132,18 +140,22 @@ class ToadObject:
 
         # Smooth the mesh.
         # Purposely turn volume_constraint off, so that the mesh can... shrink.
-        mesh = trimesh.smoothing.filter_mut_dif_laplacian(
-            mesh, lamb=0.2, iterations=200, # volume_constraint=False
+        _mesh = trimesh.smoothing.filter_mut_dif_laplacian(
+            mesh,
+            # lamb=0.2, iterations=200, volume_constraint=False
         )
 
         # Simplify the mesh.
-        mesh = mesh.simplify_quadric_decimation(200)  # This affects speed by a lot!
+        _mesh = _mesh.simplify_quadric_decimation(100)  # This affects speed by a lot!
 
         # Correct normals are important for grasp sampling!
-        mesh.fix_normals()
-        mesh.fill_holes()
+        try:
+            _mesh.fix_normals()
+            _mesh.fill_holes()
+        except:
+            _mesh = trimesh.PointCloud(vertices=vertices).convex_hull
 
-        return mesh
+        return _mesh
 
     @property
     def meshes(self) -> List[trimesh.Trimesh]:

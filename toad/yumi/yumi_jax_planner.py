@@ -64,7 +64,8 @@ class YumiJaxPlanner:
         device = poses.device
         urdf = self.jax_urdf_right if arm == "right" else self.jax_urdf_left
 
-        for i in tqdm.trange(poses.shape[0], desc="Waypoint opt"):
+        # for i in tqdm.trange(poses.shape[0], desc="Waypoint opt"):
+        for i in range(poses.shape[0]):
             # smooth the poses first.
             mat = vtf.SE3(poses[i].cpu().numpy()).as_matrix()  # (timesteps, 4, 4)
             _mat = mat.copy()

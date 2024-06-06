@@ -183,12 +183,15 @@ class Zed():
 
 
 import tyro
-def main(name: str) -> None:
+# def main(name: str) -> None:
+def main() -> None:
 
     import torch
     from viser import ViserServer
-    zed = Zed()
-    zed.start_record(f"/home/chungmin/Documents/please2/toad/motion_vids/{name}.svo2")
+    # zed = Zed(recording_file="exps/eyeglasses/2024-06-06_014947/traj.svo2")
+    zed = Zed(recording_file="test.svo2")
+    import pdb; pdb.set_trace()
+    # zed.start_record(f"/home/chungmin/Documents/please2/toad/motion_vids/{name}.svo2")
     import os
     # os.makedirs(out_dir,exist_ok=True)
     i = 0
@@ -229,44 +232,44 @@ def main(name: str) -> None:
 
 
 
-    # #code for visualizing poincloud
-    # import viser
-    # from matplotlib import pyplot as plt
-    # import viser.transforms as tf
-    # v = ViserServer()
-    # gui_reset_up = v.add_gui_button(
-    #     "Reset up direction",
-    #     hint="Set the camera control 'up' direction to the current camera's 'up'.",
-    # )
+    #code for visualizing poincloud
+    import viser
+    from matplotlib import pyplot as plt
+    import viser.transforms as tf
+    v = ViserServer()
+    gui_reset_up = v.add_gui_button(
+        "Reset up direction",
+        hint="Set the camera control 'up' direction to the current camera's 'up'.",
+    )
 
-    # @gui_reset_up.on_click
-    # def _(event: viser.GuiEvent) -> None:
-    #     client = event.client
-    #     assert client is not None
-    #     client.camera.up_direction = tf.SO3(client.camera.wxyz) @ np.array(
-    #         [0.0, -1.0, 0.0]
-    #     )
-    # while True:
-    #     left,right,depth = zed.get_frame()
-    #     left = left.cpu().numpy()
-    #     depth = depth.cpu().numpy()
-    #     # import matplotlib.pyplot as plt
-    #     # plt.imshow(left)
-    #     # plt.show()
-    #     K = zed.get_K()
-    #     T_world_camera = np.eye(4)
+    @gui_reset_up.on_click
+    def _(event: viser.GuiEvent) -> None:
+        client = event.client
+        assert client is not None
+        client.camera.up_direction = tf.SO3(client.camera.wxyz) @ np.array(
+            [0.0, -1.0, 0.0]
+        )
+    while True:
+        left,right,depth = zed.get_frame()
+        left = left.cpu().numpy()
+        depth = depth.cpu().numpy()
+        # import matplotlib.pyplot as plt
+        # plt.imshow(left)
+        # plt.show()
+        K = zed.get_K()
+        T_world_camera = np.eye(4)
 
-    #     img_wh = left.shape[:2][::-1]
+        img_wh = left.shape[:2][::-1]
 
-    #     grid = (
-    #         np.stack(np.meshgrid(np.arange(img_wh[0]), np.arange(img_wh[1])), 2) + 0.5
-    #     )
+        grid = (
+            np.stack(np.meshgrid(np.arange(img_wh[0]), np.arange(img_wh[1])), 2) + 0.5
+        )
 
-    #     homo_grid = np.concatenate([grid,np.ones((grid.shape[0],grid.shape[1],1))],axis=2).reshape(-1,3)
-    #     local_dirs = np.matmul(np.linalg.inv(K),homo_grid.T).T
-    #     points = (local_dirs * depth.reshape(-1,1)).astype(np.float32)
-    #     points = points.reshape(-1,3)
-    #     v.add_point_cloud("points", points = points.reshape(-1,3), colors=left.reshape(-1,3),point_size=.001)
+        homo_grid = np.concatenate([grid,np.ones((grid.shape[0],grid.shape[1],1))],axis=2).reshape(-1,3)
+        local_dirs = np.matmul(np.linalg.inv(K),homo_grid.T).T
+        points = (local_dirs * depth.reshape(-1,1)).astype(np.float32)
+        points = points.reshape(-1,3)
+        v.add_point_cloud("points", points = points.reshape(-1,3), colors=left.reshape(-1,3),point_size=.001)
 
 if __name__ == "__main__":
     tyro.cli(main)

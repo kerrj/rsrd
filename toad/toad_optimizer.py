@@ -80,7 +80,13 @@ class ToadOptimizer:
         self.num_groups = len(group_masks)
 
         # Initialize camera -- in world coordinates.
-        assert init_cam_pose is not None
+        # assert init_cam_pose is None
+        # H = np.eye(4)
+        # from viser import transforms as vtf
+        # H[:3,:3] = vtf.SO3.from_x_radians(np.pi/4).as_matrix()
+        # H = H[:3, :]
+        # init_cam_pose = torch.tensor(H).float().reshape(1, 3, 4)
+
         assert init_cam_pose.shape == (1, 3, 4)
         self.init_cam_pose = deepcopy(init_cam_pose)
 
@@ -110,6 +116,9 @@ class ToadOptimizer:
         )
 
         # Set up the optimizer.
+        self.cam2world_ns = cam2world_ns
+        self.group_masks, self.group_labels = group_masks, group_labels
+        self.dataset_scale = dataset_scale
         self.optimizer = RigidGroupOptimizer(
             self.pipeline.model,
             self.pipeline.datamanager.dino_dataloader,
@@ -131,6 +140,19 @@ class ToadOptimizer:
         print(f"Time taken for init (toad_object): {time.time() - start:.2f} s")
 
         self.initialized = False
+
+    def reset_optimizer(self) -> None:
+        """Re-generate self.optimizer."""
+        del self.optimizer
+        self.optimizer = RigidGroupOptimizer(
+            self.pipeline.model,
+            self.pipeline.datamanager.dino_dataloader,
+            self.cam2world_ns,
+            group_masks=self.group_masks,
+            group_labels=self.group_labels,
+            dataset_scale=self.dataset_scale,
+            render_lock=self.viewer_ns.train_lock,
+        )
 
     def _setup_crops_and_groups(self) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """Set up the crops and groups for the optimizer, interactively."""
@@ -160,7 +182,7 @@ class ToadOptimizer:
         Also updates `initialized` to `True`."""
         # retval only matters for visualization
         start = time.time()
-        xs, ys, outputs, renders = self.optimizer.initialize_obj_pose(render=True,metric_depth=True)
+        xs, ys, outputs, renders = self.optimizer.initialize_obj_pose(render=True,metric_depth=True,n_seeds=9)
         print(f"Time taken for init (pose opt): {time.time() - start:.2f} s")
 
         start = time.time()
@@ -212,3 +234,21 @@ class ToadOptimizer:
             ) for pose in parts2cam
         ]
         return parts2cam_vtf
+
+    def get_hands(self, keyframe: int) -> List[trimesh.Trimesh]:
+        """Get hands in camera frame."""
+        self.optimizer.apply_keyframe(keyframe)
+        hands = [deepcopy(_) for _ in self.optimizer.hand_frames[keyframe]]
+        T_obj_world = self.optimizer.get_registered_o2w().cpu().numpy()
+        T_world_cam = np.linalg.inv(np.concatenate([
+            self.init_cam_pose.squeeze().cpu().numpy(),
+            np.array([[0, 0, 0, 1]])
+        ], axis=0))
+        T_obj_cam = T_world_cam @ T_obj_world
+
+        # hands are in object frame! We want it in camera frame.
+        for h in hands:
+            h.apply_transform(T_obj_cam)
+            h.vertices = h.vertices / self.optimizer.dataset_scale
+
+        return hands

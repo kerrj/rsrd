@@ -6,7 +6,7 @@ import viser.transforms as vtf
 import time
 import numpy as np
 import trimesh
-from typing import Optional, List, Any, Tuple, Callable, Literal
+from typing import Optional, List, Any, Tuple, Callable, Literal, Union
 import tyro
 import moviepy.editor as mpy
 from copy import deepcopy
@@ -56,7 +56,7 @@ def gen_approach_and_motion(
     with raft_lock:
         waypoint_js, waypoint_js_success = robot.plan.ik(
             goal_wxyz_xyz=tt_path_wxyz_xyz[:, 0, :],
-            q_init=robot.plan.home_pos.expand(batch_size, -1),
+            # q_init=robot.plan.home_pos.expand(batch_size, -1),
         )
 
     if waypoint_js is None:
@@ -118,7 +118,7 @@ def create_zed_and_toad(
         f"{camera_frame_name}",
         position=camera_tf.translation,  # rough alignment.
         wxyz=camera_tf.quaternion,
-        show_axes=True,
+        show_axes=False,
         axes_length=0.05,
         axes_radius=0.007,
     )
@@ -129,14 +129,17 @@ def create_zed_and_toad(
         position=zed.cam_to_zed.translation,
         wxyz=zed.cam_to_zed.quaternion,
     )
-    
-    # phone_mesh = trimesh.creation.
+
+    # # Visualize the phone.
+    # # ... from https://sketchfab.com/3d-models/iphone-16-pro-max-based-on-the-leaked-photos-9a86002909e44639ba3cf5b06d9d3daa
+    # phone_mesh = trimesh.load('data/phone.stl')
+    # assert isinstance(phone_mesh, trimesh.Trimesh)
     # server.scene.add_mesh_trimesh(
     #     f"{camera_frame_name}/phone",
-    # )
-    # server.scene.add_label(
-    #     f"{camera_frame_name}/label",
-    #     text="Camera",
+    #     mesh=phone_mesh,
+    #     scale=0.001,
+    #     position=zed.cam_to_zed.translation,
+    #     wxyz=zed.cam_to_zed.quaternion,
     # )
 
     # Create the ToadOptimizer.
@@ -169,57 +172,71 @@ def create_objects_in_scene(
     server: viser.ViserServer,
     toad_opt: ToadOptimizer,
     object_frame_name: str = "camera/object",
-) -> Tuple[viser.GuiInputHandle, viser.GuiInputHandle, List[viser.FrameHandle]]:
-    part_handle = server.gui.add_number(
-        "Moving", -1, -1, toad_opt.num_groups - 1, 1, disabled=True
-    )
-    anchor_handle = server.gui.add_number(
-        "Anchor", -1, -1, toad_opt.num_groups - 1, 1, disabled=True
-    )
-    reset_part_anchor_handle = server.gui.add_button("Reset part and anchor")
-    @reset_part_anchor_handle.on_click
-    def _(_):
-        part_handle.value = -1
-        anchor_handle.value = -1
-        for i in range(toad_opt.num_groups):
-            curry_mesh(i)
+    create_gui: bool = True,
+) -> Union[List[viser.FrameHandle], Tuple[viser.GuiInputHandle, viser.GuiInputHandle, List[viser.FrameHandle]]]:
+    if create_gui:
+        part_handle = server.gui.add_number(
+            "Moving", -1, -1, toad_opt.num_groups - 1, 1, disabled=True
+        )
+        anchor_handle = server.gui.add_number(
+            "Anchor", -1, -1, toad_opt.num_groups - 1, 1, disabled=True
+        )
+        reset_part_anchor_handle = server.gui.add_button("Reset part and anchor")
+        @reset_part_anchor_handle.on_click
+        def _(_):
+            part_handle.value = -1
+            anchor_handle.value = -1
+            for i in range(toad_opt.num_groups):
+                curry_mesh(i)
+    
+    # Need to filter small object parts...
+    pose_deltas = toad_opt.optimizer.pose_deltas
+    foo = torch.stack(toad_opt.optimizer.keyframes)
+    bar = foo[:, :, :3, 3]
+    baz = (bar[1:] - bar[:-1]).norm(dim=-1).sum(dim=0)
+    moving_part_idx = baz.argmax().item()
+    assert isinstance(moving_part_idx, int)
+    if create_gui:
+        part_handle.value = moving_part_idx
 
     # Make the meshes s.t. that if you double-click, it becomes the anchor.
     def curry_mesh(idx):
         mesh = toad_opt.toad_object.meshes[idx]
-        if part_handle.value == idx:
-            mesh.visual.vertex_colors = [100, 255, 100, 255]
-        elif anchor_handle.value == idx:
-            mesh.visual.vertex_colors = [255, 100, 100, 255]
+        if create_gui:
+            if part_handle.value == idx:
+                mesh.visual.vertex_colors = [100, 255, 100, 255]
+            elif anchor_handle.value == idx:
+                mesh.visual.vertex_colors = [255, 100, 100, 255]
 
         handle = server.scene.add_mesh_trimesh(
             f"{object_frame_name}/group_{idx}/mesh",
             mesh=mesh,
         )
-        @handle.on_click
-        def _(_):
-            container_handle = server.scene.add_3d_gui_container(
-                f"{object_frame_name}/group_{idx}/container",
-            )
-            with container_handle:
-                anchor_button = server.gui.add_button("Anchor")
-                @anchor_button.on_click
-                def _(_):
-                    anchor_handle.value = idx
-                    if part_handle.value == idx:
-                        part_handle.value = -1
-                    curry_mesh(idx)
-                move_button = server.gui.add_button("Move")
-                @move_button.on_click
-                def _(_):
-                    part_handle.value = idx
-                    if anchor_handle.value == idx:
-                        anchor_handle.value = -1
-                    curry_mesh(idx)
-                close_button = server.gui.add_button("Close")
-                @close_button.on_click
-                def _(_):
-                    container_handle.remove()
+        if create_gui:
+            @handle.on_click
+            def _(_):
+                container_handle = server.scene.add_3d_gui_container(
+                    f"{object_frame_name}/group_{idx}/container",
+                )
+                with container_handle:
+                    anchor_button = server.gui.add_button("Anchor")
+                    @anchor_button.on_click
+                    def _(_):
+                        anchor_handle.value = idx
+                        if part_handle.value == idx:
+                            part_handle.value = -1
+                        curry_mesh(idx)
+                    move_button = server.gui.add_button("Move")
+                    @move_button.on_click
+                    def _(_):
+                        part_handle.value = idx
+                        if anchor_handle.value == idx:
+                            anchor_handle.value = -1
+                        curry_mesh(idx)
+                    close_button = server.gui.add_button("Close")
+                    @close_button.on_click
+                    def _(_):
+                        container_handle.remove()
 
         return handle
 
@@ -230,7 +247,7 @@ def create_objects_in_scene(
                 f"{object_frame_name}/group_{i}",
                 position=tf.translation(),
                 wxyz=tf.rotation().wxyz,
-                show_axes=True,
+                show_axes=False,
                 axes_length=0.03,
                 axes_radius=.004
             )
@@ -246,7 +263,10 @@ def create_objects_in_scene(
                 wxyz=grasp[3:],
             )
 
-    return part_handle, anchor_handle, frame_list
+    if create_gui:
+        return part_handle, anchor_handle, frame_list
+    else:
+        return frame_list
 
 
 def main(
@@ -256,10 +276,16 @@ def main(
     # keyframe_path: Path = Path("renders/garfield_poly/keyframes.pt")
     # config_path: Path = Path("outputs/sunglasses3/dig/2024-06-03_175202/config.yml"),
     # keyframe_path: Path = Path("renders/sunglasses3/keyframes.pt")
-    config_path: Path = Path("outputs/scissors/dig/2024-06-03_135548/config.yml"),
-    keyframe_path: Path = Path("renders/scissors/keyframes.pt")
+    # config_path: Path = Path("outputs/scissors/dig/2024-06-03_135548/config.yml"),
+    # keyframe_path: Path = Path("renders/scissors/keyframes.pt")
     # config_path: Path = Path("outputs/wooden_drawer/dig/2024-06-03_160055/config.yml"),
     # keyframe_path: Path = Path("renders/wooden_drawer/keyframes.pt")
+    # config_path: Path = Path("outputs/painter_t/dig/2024-06-05_103134/config.yml"),
+    # keyframe_path: Path = Path("renders/painter_t/keyframes.pt")
+    # config_path: Path = Path("outputs/big_painter_t/dig/2024-06-05_122620/config.yml"),
+    # keyframe_path: Path = Path("renders/big_painter_t/keyframes.pt")
+    config_path: Path = Path("outputs/buddha_empty/dig/2024-06-02_224243/config.yml"),
+    keyframe_path: Path = Path("renders/buddha_empty/keyframes.pt")
 ):
     """Quick interactive demo for object traj following.
 
@@ -320,7 +346,7 @@ def main(
     # Create the trajectories!
     traj, traj_handle, play_handle = None, None, None
     goal_button = server.gui.add_button("Calculate working grasps")
-    real_button = server.gui.add_button("Move real robot", disabled=(robot.real is None))
+    real_button = server.gui.add_button("Move real robot")
     reset_button = server.gui.add_button("Reset real robot")
 
     @reset_button.on_click
@@ -479,7 +505,12 @@ def main(
                 goal_button.disabled = False
                 return
 
-            traj = torch.stack(working_trajs, dim=0)
+            if len(working_trajs) == 0:
+                print("No valid bimanual setup.")
+                goal_button.disabled = False
+                return
+            else:
+                traj = torch.stack(working_trajs, dim=0)
         else:
             # Single arm.
             working_trajs = []

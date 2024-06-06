@@ -37,7 +37,7 @@ YUMI_REST_POSE_LEFT = {
     "yumi_joint_1_l": -1.24839656,
     "yumi_joint_2_l": -1.09802876,
     "yumi_joint_7_l": 1.06634394,
-    "yumi_joint_3_l": 0.31386161,
+    "yumi_joint_3_l": 0.31386161 - 0.2,
     "yumi_joint_4_l": 1.90125141,
     "yumi_joint_5_l": 1.3205139,
     "yumi_joint_6_l": 2.43563939,
@@ -47,7 +47,7 @@ YUMI_REST_POSE_RIGHT = {
     "yumi_joint_1_r": 1.21442839,
     "yumi_joint_2_r": -1.03205606,
     "yumi_joint_7_r": -1.10072738,
-    "yumi_joint_3_r": 0.2987352,
+    "yumi_joint_3_r": 0.2987352 - 0.2,
     "yumi_joint_4_r": -1.85257716,
     "yumi_joint_5_r": 1.25363652,
     "yumi_joint_6_r": -2.42181893,
@@ -57,14 +57,14 @@ YUMI_REST_POSE = {
     "yumi_joint_1_r": 1.21442839,
     "yumi_joint_2_r": -1.03205606,
     "yumi_joint_7_r": -1.10072738,
-    "yumi_joint_3_r": 0.2987352,
+    "yumi_joint_3_r": 0.2987352 - 0.2,
     "yumi_joint_4_r": -1.85257716,
     "yumi_joint_5_r": 1.25363652,
     "yumi_joint_6_r": -2.42181893,
     "yumi_joint_1_l": -1.24839656,
     "yumi_joint_2_l": -1.09802876,
     "yumi_joint_7_l": 1.06634394,
-    "yumi_joint_3_l": 0.31386161,
+    "yumi_joint_3_l": 0.31386161 - 0.2,
     "yumi_joint_4_l": 1.90125141,
     "yumi_joint_5_l": 1.3205139,
     "yumi_joint_6_l": 2.43563939,
@@ -168,7 +168,7 @@ class YumiArmPlanner:
             interpolation_dt=0.25,
             trajopt_dt=0.25,
             collision_activation_distance=0.005,  # keeping this small is important, because gripper balls interfere w/ opt.
-            interpolation_steps=50,
+            interpolation_steps=100,
             world_coll_checker=self._robot_world.world_model,
             self_collision_check=True,
             self_collision_opt=True,
@@ -326,30 +326,35 @@ class YumiArmPlanner:
             succ: Whether the IK was successful. (n,)
         """
         batch_size = goal_wxyz_xyz.shape[0]
-        assert batch_size % self._minibatch_size == 0, f"Batch size ({batch_size}) must be divisible by {self._minibatch_size}."
+        # assert batch_size % self._minibatch_size == 0, f"Batch size ({batch_size}) must be divisible by {self._minibatch_size}."
         assert goal_wxyz_xyz.shape == (batch_size, 7)
         assert q_init is None or q_init.shape == (batch_size, 8), f"q_init must be None or (batch_size, 8), got {q_init.shape}."
 
         with self._active_arm_lock:
-            if q_init is None:
-                q_init = self.home_pos.view(1, -1).repeat(batch_size, 1)
+            # if q_init is None:
+            #     q_init = self.home_pos.view(1, -1).repeat(batch_size, 1)
 
+            if q_init is not None:
+                q_init = q_init.to(self.device)
+                assert q_init.shape == (batch_size, 8)
+
+                if self._freeze_gripper:
+                    q_init = q_init[:, :-1].contiguous()  # remove gripper joint from dof.
+                
+                q_init = q_init.unsqueeze(0)  # [1, batch, dof] for seed.
+
+            assert goal_wxyz_xyz.shape == (batch_size, 7)
             goal_wxyz_xyz = goal_wxyz_xyz.to(self.device)
-            q_init = q_init.to(self.device)
-            assert goal_wxyz_xyz.shape == (batch_size, 7) and q_init.shape == (batch_size, 8)
-
             goal_pose = Pose(goal_wxyz_xyz[:, 4:], goal_wxyz_xyz[:, :4])
-            if self._freeze_gripper:
-                q_init = q_init[:, :-1].contiguous()  # remove gripper joint from dof.
 
             # Loop through IK.
             result_list = []
-            for i in tqdm.trange(0, batch_size, self._minibatch_size, desc="IK"):
-                result = self._ik_solver.solve_batch(
-                    goal_pose=goal_pose[i : i + self._minibatch_size],
-                    seed_config=q_init[i : i + self._minibatch_size].unsqueeze(0),  # [1, batch, dof] for seed.
-                )
-                result_list.append(result)
+            # for i in tqdm.trange(0, batch_size, self._minibatch_size, desc="IK"):
+            result = self._ik_solver.solve_batch(
+                goal_pose=goal_pose,
+                seed_config=q_init
+            )
+            result_list.append(result)
 
             # js_solution is [batch, time, dof] tensor!
             q = torch.cat([
