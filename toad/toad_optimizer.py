@@ -119,6 +119,10 @@ class ToadOptimizer:
         self.cam2world_ns = cam2world_ns
         self.group_masks, self.group_labels = group_masks, group_labels
         self.dataset_scale = dataset_scale
+
+        self.orig_means = self.pipeline.model.gauss_params["means"].detach().clone()
+        self.orig_quats = self.pipeline.model.gauss_params["quats"].detach().clone()
+
         self.optimizer = RigidGroupOptimizer(
             self.pipeline.model,
             self.pipeline.datamanager.dino_dataloader,
@@ -143,7 +147,10 @@ class ToadOptimizer:
 
     def reset_optimizer(self) -> None:
         """Re-generate self.optimizer."""
+        self.optimizer.reset_transforms()
         del self.optimizer
+        self.pipeline.model.gauss_params["means"] = self.orig_means.clone()
+        self.pipeline.model.gauss_params["quats"] = self.orig_quats.clone()
         self.optimizer = RigidGroupOptimizer(
             self.pipeline.model,
             self.pipeline.datamanager.dino_dataloader,

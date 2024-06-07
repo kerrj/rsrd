@@ -25,7 +25,7 @@ from toad.toad_object import GraspableToadObject
 
 # Physical height of the table.
 # TABLE_HEIGHT=-0.006
-TABLE_HEIGHT=-0.006+0.03
+TABLE_HEIGHT=-0.006+0.055
 
 # Real robot's speed, settings, etc.
 REAL_ROBOT_SPEED=(0.1, np.pi/4)

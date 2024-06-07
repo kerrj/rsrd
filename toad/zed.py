@@ -183,35 +183,36 @@ class Zed():
 
 
 import tyro
-# def main(name: str) -> None:
-def main() -> None:
+def main(name: str) -> None:
+# def main() -> None:
 
     import torch
     from viser import ViserServer
     # zed = Zed(recording_file="exps/eyeglasses/2024-06-06_014947/traj.svo2")
-    zed = Zed(recording_file="test.svo2")
-    import pdb; pdb.set_trace()
+     #jzed = Zed(recording_file="test.svo2")
+    # import pdb; pdb.set_trace()
+    zed = Zed(recording_file = "exps/scissors/2024-06-06_155342/traj.svo2")
     # zed.start_record(f"/home/chungmin/Documents/please2/toad/motion_vids/{name}.svo2")
     import os
     # os.makedirs(out_dir,exist_ok=True)
     i = 0
-    import cv2
-    while True:
-        left, right, _ = zed.get_frame(depth=False)
-        # if left is None:
-        #     break
-        left,right = left.cpu().numpy(),right.cpu().numpy()
-        cv2.imshow("Left Image", left)
-        key = cv2.waitKey(1)
-        if key == ord('q'):
-            break
-        # # save left as jpg with PIL
-        # from PIL import Image
-        # out_dir = "/home/chungmin/Documents/please2/toad/motion_vids/redbox_ball"
-        # Image.fromarray(left).save(os.path.join(out_dir,f"left_{i}.jpg"))
-        # #save depth
-        # np.save(os.path.join(out_dir,f"depth_{i}.npy"),depth)
-        i+=1
+    # import cv2
+    # while True:
+    #     left, right, _ = zed.get_frame(depth=False)
+    #     # if left is None:
+    #     #     break
+    #     left,right = left.cpu().numpy(),right.cpu().numpy()
+    #     cv2.imshow("Left Image", left)
+    #     key = cv2.waitKey(1)
+    #     if key == ord('q'):
+    #         break
+    #     # # save left as jpg with PIL
+    #     # from PIL import Image
+    #     # out_dir = "/home/chungmin/Documents/please2/toad/motion_vids/redbox_ball"
+    #     # Image.fromarray(left).save(os.path.join(out_dir,f"left_{i}.jpg"))
+    #     # #save depth
+    #     # np.save(os.path.join(out_dir,f"depth_{i}.npy"),depth)
+    #     i+=1
 
     # zed.start_record("/home/justin/lerf/motion_vids/mac_charger_fold.svo2")
     # # s = ViserServer()
