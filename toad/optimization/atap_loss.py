@@ -25,9 +25,9 @@ def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = floa
     
 
 class ATAPLoss:
-    touch_radius: float = .002
+    touch_radius: float = .0015
     N: int = 500
-    loss_mult: float = .1
+    loss_mult: float = .2
     loss_alpha: float = 0.1 #rule: for jointed, use 1.0 alpha, for non-jointed use 0.1 ish
     def __init__(self, dig_model: DiGModel, group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float = 1.0):
         """
@@ -60,6 +60,8 @@ class ATAPLoss:
         returns: a differentiable loss
         """
         if len(self.group_masks) == 1:
+            return torch.tensor(0.0,device='cuda')
+        if self.dists.shape[0] == 0:
             return torch.tensor(0.0,device='cuda')
         assert connectivity_weights.shape == (len(self.group_masks),len(self.group_masks)), "connectivity weights must be a square matrix of size num_groups"
         loss = wp.empty(self.dists.shape[0], dtype=wp.float32, requires_grad=True, device='cuda')

@@ -122,7 +122,7 @@ class RigidGroupOptimizer:
     rank_loss_erode: int = 5
     depth_ignore_threshold: float = 0.1  # in meters
     use_atap: bool = True
-    pose_lr: float = 0.005
+    pose_lr: float = 0.003
     pose_lr_final: float = 0.0005
     mask_hands: bool = True
     use_roi: bool = False
