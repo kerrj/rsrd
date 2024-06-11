@@ -24,7 +24,8 @@ from toad.toad_object import GraspableToadObject
 
 
 # Physical height of the table.
-TABLE_HEIGHT=-0.006
+# TABLE_HEIGHT=-0.006
+TABLE_HEIGHT=-0.006+0.055
 
 # Real robot's speed, settings, etc.
 REAL_ROBOT_SPEED=(0.1, np.pi/4)
@@ -546,7 +547,7 @@ def main(
                 robot.plan.activate_arm("right", robot.q_left)
             moving_js, moving_success = robot.plan.ik(
                 goal_wxyz_xyz=moving_grasp_path_wxyz_xyz[:, 0, :],
-                q_init=robot.q_left.expand(batch_size, -1),
+                # q_init=robot.q_left.expand(batch_size, -1),
             )
             if moving_js is None:
                 print("Failed to solve IK (moving).")
@@ -573,9 +574,16 @@ def main(
                 for keyframe_idx in range(len(keyframes))
             ], dim=1).float().cuda() # [num_grasps, num_keyframes, 7]
 
+            approach_path = moving_grasp_path_wxyz_xyz[:, 0, :].cpu().numpy() # [num_grasps, 7]
+            approach_offsets = vtf.SE3.from_translation(np.array([[0, 0, d] for d in np.linspace(-0.08, 0.0, 10)]))
+            # approach_path = vtf.SE3(approach_path.cpu().numpy()).multiply(approach_offsets).wxyz_xyz
+            approach_path = np.zeros((moving_grasp_path_wxyz_xyz.shape[0], 10, 7))
+            for i in range(moving_grasp_path_wxyz_xyz.shape[0]):
+                approach_path[i] = vtf.SE3(moving_grasp_path_wxyz_xyz[i, 0].cpu().numpy()).multiply(approach_offsets).wxyz_xyz
+
             # if plan_dropdown.value == "left":
             traj, succ = robot.plan_jax.plan_from_waypoints(
-                poses=moving_grasp_path_wxyz_xyz[moving_success],
+                poses=torch.cat([torch.Tensor(approach_path).to(moving_grasp_path_wxyz_xyz.device), moving_grasp_path_wxyz_xyz], dim=1)[moving_success],
                 arm=plan_dropdown.value,
             )
 
@@ -601,7 +609,7 @@ def main(
                 else:
                     robot.q_right = traj[traj_handle.value][play_handle.value].view(-1)
                 # robot.q_all = traj[traj_handle.value][play_handle.value].view(-1)
-                update_keyframe(play_handle.value)
+                update_keyframe(max(0, play_handle.value - 10))
 
             @traj_handle.on_update
             def _(_):

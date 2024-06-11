@@ -3,6 +3,7 @@ from typing import List, Optional, Union
 import torch
 import numpy as np
 import trimesh
+import trimesh.bounds
 import trimesh.repair
 import trimesh.creation
 import viser.transforms as vtf
@@ -13,6 +14,14 @@ import tyro
 import pickle as pkl
 
 from curobo.geom.types import Mesh, Sphere
+
+MANO_INDICES = [
+    745,  # thumb
+    349,  # index
+    429,  # middle
+    554,  # ring
+    692,  # pinky
+]
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -51,7 +60,7 @@ class ToadObject:
             mask = cluster_labels == i
             part_vertices = np.array(pcd_object.vertices[mask])
             assert isinstance(part_vertices, np.ndarray)
-            part_mesh = ToadObject._points_to_mesh(part_vertices)
+            part_mesh = ToadObject._points_to_mesh(part_vertices, scene_scale)
             part_mesh.vertices -= part_vertices.mean(axis=0)  # Center the mesh at the centroid.
             part_mesh.vertices /= scene_scale
             part_mesh_list.append(part_mesh)
@@ -78,7 +87,7 @@ class ToadObject:
             mask = clusters == i
             part_vertices = points[mask]
             assert isinstance(part_vertices, np.ndarray)
-            part_mesh = ToadObject._points_to_mesh(part_vertices)
+            part_mesh = ToadObject._points_to_mesh(part_vertices, scene_scale)
             part_mesh.vertices -= part_vertices.mean(axis=0)  # Center the mesh at the centroid.
             part_mesh.vertices /= scene_scale
             part_mesh_list.append(part_mesh)
@@ -116,7 +125,7 @@ class ToadObject:
         )
 
     @staticmethod
-    def _points_to_mesh(vertices: np.ndarray) -> trimesh.Trimesh:
+    def _points_to_mesh(vertices: np.ndarray, scene_scale: float) -> trimesh.Trimesh:
         """Converts a point cloud to a mesh, using alpha hulls and smoothing."""
         points = o3d.geometry.PointCloud()
         points.points = o3d.utility.Vector3dVector(vertices)
@@ -131,19 +140,33 @@ class ToadObject:
         )
 
         # Smooth the mesh.
-        # Purposely turn volume_constraint off, so that the mesh can... shrink.
-        mesh = trimesh.smoothing.filter_mut_dif_laplacian(
-            mesh, lamb=0.2, iterations=200, # volume_constraint=False
+        _mesh = trimesh.smoothing.filter_mut_dif_laplacian(
+            mesh,
         )
 
         # Simplify the mesh.
-        mesh = mesh.simplify_quadric_decimation(200)  # This affects speed by a lot!
+        _mesh = _mesh.simplify_quadric_decimation(100)  # This affects speed by a lot!
 
         # Correct normals are important for grasp sampling!
-        mesh.fix_normals()
-        mesh.fill_holes()
+        try:
+            # If mesh is too big... then shrink it down.
+            obb_orig, obb_extents = trimesh.bounds.oriented_bounds(_mesh)
+            # if obb_extents.min() > 0.025:
+            #     _mesh.vertices *= 0.95  # slightly shrink the mesh.
+            _mesh_obb = _mesh.copy()
+            _mesh_obb.vertices = trimesh.transform_points(_mesh.vertices, obb_orig)
+            for i in range(3):
+                if obb_extents[i] / scene_scale > 0.04 and obb_extents[i] / scene_scale < 0.05:
+                    print("triggered")
+                    _mesh_obb.vertices[:, i] *= 0.80
+            _mesh.vertices = trimesh.transform_points(_mesh_obb.vertices, np.linalg.inv(obb_orig))
 
-        return mesh
+            _mesh.fix_normals()
+            _mesh.fill_holes()
+        except:
+            _mesh = trimesh.PointCloud(vertices=vertices).convex_hull
+
+        return _mesh
 
     @property
     def meshes(self) -> List[trimesh.Trimesh]:
@@ -201,7 +224,7 @@ class ToadObject:
             assert isinstance(part_vertices, np.ndarray)
 
             part_vertices = part_vertices * scene_scale
-            part_mesh = ToadObject._points_to_mesh(part_vertices)
+            part_mesh = ToadObject._points_to_mesh(part_vertices, scene_scale)
             part_mesh.vertices -= part_vertices.mean(axis=0)  # Center the mesh at the centroid.
             part_mesh.vertices /= scene_scale
 
