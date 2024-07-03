@@ -6,7 +6,9 @@ from toad.utils import *
 from nerfstudio.model_components.losses import depth_ranking_loss
 from toad.optimization.utils import *
 
-class Frame:
+
+
+class PosedObservation:
     """
     Class for computing relevant data products for a frame and storing them
     """
@@ -61,3 +63,20 @@ class Frame:
             ).squeeze()
             == 0.0
         )
+        
+
+class VideoSequence:
+    def __init__(self):
+        self.frames = []
+
+    def add_frame(self, frame:PosedObservation, idx:int =-1):
+        self.frames.append(frame)
+
+    def get_last_frame(self):
+        return self.frames[-1]
+
+    def get_frame(self, idx:int):
+        return self.frames[idx]
+
+    def __len__(self):
+        return len(self.frames)

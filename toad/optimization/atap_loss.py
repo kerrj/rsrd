@@ -24,11 +24,12 @@ def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = floa
     loss[tid] = jon_loss(curdist - dists[tid], alpha, 0.001) * con_weight * .001
     
 
+
 class ATAPLoss:
     touch_radius: float = .0015
     N: int = 500
-    loss_mult: float = .2
-    loss_alpha: float = 1.0 #rule: for jointed, use 1.0 alpha, for non-jointed use 0.1 ish
+    loss_mult: float = .1
+    loss_alpha: float = 1.0#rule: for jointed, use 1.0 alpha, for non-jointed use 0.1 ish
     def __init__(self, dig_model: DiGModel, group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float = 1.0):
         """
         Initializes the data structure to compute the loss between groups touching
@@ -50,6 +51,12 @@ class ATAPLoss:
         self.group_ids1 = torch.cat([x[3] for x in self.nn_info]).cuda().int()
         self.group_ids2 = torch.cat([x[4] for x in self.nn_info]).cuda().int()
         self.num_pairs = torch.cat([torch.tensor(len(x[1])).repeat(len(x[1])) for x in self.nn_info]).cuda().float()
+        # initialize the hashgrid struct for computing neighbors
+        # self.hashgrid = wp.HashGrid(dim_x=100, dim_y=100, dim_z=100, device='cuda')
+        # self.search_radius = torch.quantile(dig_model.scales.exp().max(dim=1).values, 0.97)
+        # self.hashgrid.build(wp.from_torch(dig_model.means,dtype=wp.vec3), self.search_radius)
+        # for grp in self.group_masks:
+
         
 
     def __call__(self, connectivity_weights: torch.Tensor):

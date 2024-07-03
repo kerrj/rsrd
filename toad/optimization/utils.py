@@ -1,6 +1,49 @@
 import warp as wp
 import torch
 
+def zero_optim_state(optimizer:torch.optim.Adam, timestamps):
+    param = optimizer.param_groups[0]["params"][0]
+    param_state = optimizer.state[param]
+    if "max_exp_avg_sq" in param_state:
+        # for amsgrad
+        param_state["max_exp_avg_sq"][timestamps] = 0.0
+    if "exp_avg" in param_state:
+        param_state["exp_avg"][timestamps] = 0.0
+        param_state["exp_avg_sq"][timestamps] = 0.0
+
+def append_in_optim(optimizer:torch.optim.Adam, new_params):
+    """adds the parameters to the optimizer"""
+    param = optimizer.param_groups[0]["params"][0]
+    param_state = optimizer.state[param]
+    if "max_exp_avg_sq" in param_state:
+        # for amsgrad
+        param_state["max_exp_avg_sq"] = torch.cat(
+            [
+                param_state["max_exp_avg_sq"],
+                param_state["max_exp_avg_sq"][-1].unsqueeze(0)
+            ],
+            dim=0,
+        )
+    if "exp_avg" in param_state:
+        param_state["exp_avg"] = torch.cat(
+            [
+                param_state["exp_avg"],
+                param_state["exp_avg"][-1].unsqueeze(0)
+            ],
+            dim=0,
+        )
+        param_state["exp_avg_sq"] = torch.cat(
+            [
+                param_state["exp_avg_sq"],
+                param_state["exp_avg_sq"][-1].unsqueeze(0)
+            ],
+            dim=0,
+        )
+
+    del optimizer.state[param]
+    optimizer.state[new_params[0]] = param_state
+    optimizer.param_groups[0]["params"] = new_params
+    del param
 
 @wp.func
 def poses_7vec_to_transform(poses: wp.array(dtype=float, ndim=2), i: int):
@@ -9,6 +52,15 @@ def poses_7vec_to_transform(poses: wp.array(dtype=float, ndim=2), i: int):
     """
     position = wp.vector(poses[i,0], poses[i,1], poses[i,2])
     quaternion = wp.quaternion(poses[i,4], poses[i,5], poses[i,6], poses[i,3])
+    return wp.transformation(position, quaternion)
+
+@wp.func
+def poses_7vec_to_transform(poses: wp.array(dtype=float, ndim=3), i: int, j: int):
+    """
+    Kernel helper for converting x y z qw qx qy qz to a wp.Transformation
+    """
+    position = wp.vector(poses[i, j, 0], poses[i, j, 1], poses[i, j, 2])
+    quaternion = wp.quaternion(poses[i, j, 4], poses[i, j, 5], poses[i, j, 6], poses[i, j, 3])
     return wp.transformation(position, quaternion)
 
 @wp.kernel
@@ -52,6 +104,41 @@ def apply_to_model(
     quats_out[tid, 1] = new_quat[0] #x
     quats_out[tid, 2] = new_quat[1] #y
     quats_out[tid, 3] = new_quat[2] #z
+
+@wp.kernel
+def traj_smoothness_loss(
+    deltas: wp.array(dtype=float, ndim=3),
+    position_lambda: float,
+    rotation_lambda: float,
+    loss: wp.array(dtype=float, ndim=2),
+):
+    """
+    Kernel for computing the smoothness loss of a trajectory
+
+    deltas: TxNx7 tensor of deltas, where T is the number of frames, N is the number of parts, and 7 is the pose vector
+    loss: TxN tensor of loss per-pose, computed by the weighted sum of position and rotation distance from neighbors
+    """
+    t, n = wp.tid()
+    pose = poses_7vec_to_transform(deltas,t,n)
+    local_loss = float(0.0)
+    dummy_axis = wp.vector(0.,0.,0.)
+    if t>0:
+        prev_pose = poses_7vec_to_transform(deltas,t-1,n)
+        local_loss += wp.length_sq(wp.transform_get_translation(pose) - wp.transform_get_translation(prev_pose)) * position_lambda
+        q_delta_1 = wp.transform_get_rotation(pose) * wp.quat_inverse(wp.transform_get_rotation(prev_pose))
+        q_dist_1 = float(0.0)
+        wp.quat_to_axis_angle(q_delta_1, dummy_axis, q_dist_1)
+        local_loss += q_dist_1 * rotation_lambda
+    if t < deltas.shape[0] - 1:
+        next_pose = poses_7vec_to_transform(deltas,t+1,n)
+        local_loss += wp.length_sq(wp.transform_get_translation(pose) - wp.transform_get_translation(next_pose)) * position_lambda
+        q_delta_2 = wp.transform_get_rotation(pose) * wp.quat_inverse(wp.transform_get_rotation(next_pose))
+        q_dist_2 = float(0.0)
+        wp.quat_to_axis_angle(q_delta_2, dummy_axis, q_dist_2)
+        local_loss += q_dist_2 * rotation_lambda
+
+    loss[t,n] = local_loss
+    
 
 def identity_7vec(device='cuda'):
     """
