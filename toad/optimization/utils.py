@@ -1,5 +1,15 @@
 import warp as wp
 import torch
+from toad.transforms import SE3,SO3
+
+def extrapolate_poses(p1_7v, p2_7v):    
+    r1 = SO3(p1_7v[...,3:])
+    t1 = SE3.from_rotation_and_translation(r1, p1_7v[...,:3])
+    r2 = SO3(p2_7v[...,3:])
+    t2 = SE3.from_rotation_and_translation(r2, p2_7v[...,:3])
+    t_2_1 = t1.inverse() @ t2
+    new_t = (t2 @ t_2_1)
+    return new_t.wxyz_xyz.roll(3,dims=-1)
 
 def zero_optim_state(optimizer:torch.optim.Adam, timestamps):
     param = optimizer.param_groups[0]["params"][0]

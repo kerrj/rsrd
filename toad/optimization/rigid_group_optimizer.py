@@ -26,7 +26,7 @@ from nerfstudio.engine.schedulers import (
 import warp as wp
 from toad.optimization.atap_loss import ATAPLoss
 from toad.utils import *
-import viser.transforms as vtf
+import toad.transforms as vtf
 import trimesh
 from typing import Tuple
 from nerfstudio.model_components.losses import depth_ranking_loss
@@ -35,12 +35,12 @@ from toad.optimization.observation import PosedObservation, VideoSequence
 
 class RigidGroupOptimizer:
     use_depth: bool = True
-    rank_loss_mult: float = 0.1
+    rank_loss_mult: float = 0.2
     rank_loss_erode: int = 5
     depth_ignore_threshold: float = 0.1  # in meters
     use_atap: bool = True
     pose_lr: float = 0.005
-    pose_lr_final: float = 0.0005
+    pose_lr_final: float = 0.001
     mask_hands: bool = True
     do_obj_optim: bool = True
     blur_kernel_size: int = 5
@@ -97,9 +97,9 @@ class RigidGroupOptimizer:
         self.init_means = self.dig_model.gauss_params["means"].detach().clone()
         self.init_quats = self.dig_model.gauss_params["quats"].detach().clone()
         # Save the initial object to world transform, and initial part to object transforms
-        self.init_o2w = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-            vtf.SO3.identity(), self.init_means.mean(dim=0).cpu().numpy().squeeze()
-        ).as_matrix()).float().cuda()
+        self.init_o2w = vtf.SE3.from_rotation_and_translation(
+            vtf.SO3.identity(dtype=torch.float32,device='cuda'), self.init_means.mean(dim=0).squeeze()
+        ).as_matrix()
         self.init_o2w_7vec = torch.tensor([[0,0,0,1,0,0,0]],dtype=torch.float32,device='cuda')
         self.init_o2w_7vec[0,:3] = self.init_means.mean(dim=0).squeeze()
         self.init_p2o = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
@@ -108,9 +108,9 @@ class RigidGroupOptimizer:
         for i,g in enumerate(self.group_masks):
             gp_centroid = self.init_means[g].mean(dim=0)
             self.init_p2o_7vec[i,:3] = gp_centroid
-            self.init_p2o[i,:,:] = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-                vtf.SO3.identity(), (gp_centroid - self.init_means.mean(dim=0)).cpu().numpy()
-            ).as_matrix()).float().cuda()
+            self.init_p2o[i,:,:] = vtf.SE3.from_rotation_and_translation(
+                vtf.SO3.identity(dtype=torch.float32,device='cuda'), (gp_centroid - self.init_means.mean(dim=0))
+            ).as_matrix()
         self.sequence = VideoSequence()
 
     def initialize_obj_pose(self, first_obs: PosedObservation, niter=200, n_seeds=6, render=False):
@@ -177,7 +177,7 @@ class RigidGroupOptimizer:
             whole_pose_adj = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
             # x y z qw qx qy qz
             # (x,y,z) = something along ray - centroid
-            quat = torch.from_numpy(vtf.SO3.from_z_radians(z_rot).wxyz).cuda()
+            quat = vtf.SO3.from_z_radians(torch.tensor(z_rot)).wxyz.float().cuda()
             whole_pose_adj[:, :3] = point - obj_centroid
             whole_pose_adj[:, 3:] = quat
             loss, final_pose = try_opt(whole_pose_adj, niter, False)
@@ -274,11 +274,10 @@ class RigidGroupOptimizer:
         )
         dino_feats = torch.where(object_mask,dig_outputs["dino"],dino_feats)
         if use_hand_mask:
-            mse_loss = (frame.dino_feats - dino_feats)[frame.hand_mask].norm(dim=-1)
+            loss = (frame.dino_feats - dino_feats)[frame.hand_mask].norm(dim=-1).mean()
         else:
-            mse_loss = (frame.dino_feats - dino_feats).norm(dim=-1)
+            loss = (frame.dino_feats - dino_feats).norm(dim=-1).mean()
         # THIS IS BAD WE NEED TO FIX THIS (because resizing makes the image very slightly misaligned)
-        loss = mse_loss.mean()
         if use_depth:
             if frame.metric_depth:
                 physical_depth = dig_outputs["depth"] / self.dataset_scale
@@ -550,7 +549,7 @@ class RigidGroupOptimizer:
             self.dig_model.gauss_params["means"] = self.init_means.detach().clone()
             self.dig_model.gauss_params["quats"] = self.init_quats.detach().clone()
 
-    def add_frame(self, frame: PosedObservation):
+    def add_frame(self, frame: PosedObservation, extrapolate_velocity = True):
         """
         Sets the rgb_frame to optimize the pose for
         rgb_frame: HxWxC tensor image
@@ -558,12 +557,15 @@ class RigidGroupOptimizer:
         assert self.is_initialized, "Must initialize first with the first frame"
         self.sequence.add_frame(frame)
         # add another timestep of pose to the part and object poses
-        self.part_deltas = torch.nn.Parameter(torch.cat(
-            [self.part_deltas.detach(), self.part_deltas[-1].unsqueeze(0).detach()], dim=0
-        ))
-        self.obj_delta = torch.nn.Parameter(torch.cat(
-            [self.obj_delta.detach(), self.obj_delta[-1].unsqueeze(0).detach()], dim=0
-        ))
+        if extrapolate_velocity and self.obj_delta.shape[0] > 1:
+            with torch.no_grad():
+                new_obj = extrapolate_poses(self.obj_delta[-2], self.obj_delta[-1])
+                new_parts = extrapolate_poses(self.part_deltas[-2], self.part_deltas[-1])
+                self.obj_delta = torch.nn.Parameter(torch.cat([self.obj_delta, new_obj.unsqueeze(0)], dim=0))
+                self.part_deltas = torch.nn.Parameter(torch.cat([self.part_deltas, new_parts.unsqueeze(0)], dim=0))
+        else:
+            self.obj_delta = torch.nn.Parameter(torch.cat([self.obj_delta, self.obj_delta[-1].unsqueeze(0)], dim=0))
+            self.part_deltas = torch.nn.Parameter(torch.cat([self.part_deltas, self.part_deltas[-1].unsqueeze(0)], dim=0))
         append_in_optim(self.part_optimizer, [self.part_deltas])
         append_in_optim(self.obj_optimizer, [self.obj_delta])
         zero_optim_state(self.part_optimizer, [-2])
