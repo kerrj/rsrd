@@ -1,14 +1,19 @@
 import warp as wp
 import torch
+from copy import deepcopy
 from toad.transforms import SE3,SO3
+from nerfstudio.cameras.cameras import Cameras
 
-def extrapolate_poses(p1_7v, p2_7v):    
+
+def extrapolate_poses(p1_7v, p2_7v,lam):
     r1 = SO3(p1_7v[...,3:])
     t1 = SE3.from_rotation_and_translation(r1, p1_7v[...,:3])
     r2 = SO3(p2_7v[...,3:])
     t2 = SE3.from_rotation_and_translation(r2, p2_7v[...,:3])
     t_2_1 = t1.inverse() @ t2
-    new_t = (t2 @ t_2_1)
+    delta_pos = t_2_1.translation()*lam
+    delta_rot = SO3.exp((t_2_1.rotation().log()*lam))
+    new_t = (t2 @ SE3.from_rotation_and_translation(delta_rot, delta_pos))
     return new_t.wxyz_xyz.roll(3,dims=-1)
 
 def zero_optim_state(optimizer:torch.optim.Adam, timestamps):
@@ -207,3 +212,12 @@ def mnn_matcher(feat_a, feat_b):
     ids1 = torch.arange(0, sim.shape[0], device=device)
     mask = ids1 == nn21[nn12]
     return ids1[mask], nn12[mask]
+
+def crop_camera(camera: Cameras, xmin, xmax, ymin, ymax):
+    height = torch.tensor(ymax - ymin,device='cuda').view(1,1).int()
+    width = torch.tensor(xmax - xmin,device='cuda').view(1,1).int()
+    cx = torch.tensor(camera.cx.clone() - xmin,device='cuda').view(1,1)
+    cy = torch.tensor(camera.cy.clone() - ymin,device='cuda').view(1,1)
+    fx = camera.fx.clone()
+    fy = camera.fy.clone()
+    return Cameras(camera.camera_to_worlds.clone(), fx, fy, cx, cy, width, height)
