@@ -44,7 +44,7 @@ class RigidGroupOptimizer:
     roi_inflate: float = 0.25
     pose_lr: float = 0.005
     pose_lr_final: float = 0.001
-    mask_hands: bool = True
+    mask_hands: bool = False
     do_obj_optim: bool = True
     blur_kernel_size: int = 5
 
@@ -170,7 +170,7 @@ class RigidGroupOptimizer:
             frame_feats = downsamp_frame_feats.reshape(
                 -1, downsamp_frame_feats.shape[-1]
             )  # (H*W) x C
-            downsamp = 2
+            downsamp = 4
             frame_feats = frame_feats[::downsamp]
             _, match_ids = mnn_matcher(dino_feats, frame_feats)
             x, y = (match_ids*downsamp % (self.sequence.get_last_frame().frame.camera.width)).float(), (

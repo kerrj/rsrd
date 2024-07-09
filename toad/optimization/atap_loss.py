@@ -24,7 +24,6 @@ def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = floa
     loss[tid] = jon_loss(curdist - dists[tid], alpha, 0.001) * con_weight * .001
     
 
-
 class ATAPLoss:
     touch_radius: float = .0015
     N: int = 500
