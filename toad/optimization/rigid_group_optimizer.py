@@ -24,7 +24,7 @@ from nerfstudio.engine.schedulers import (
     ExponentialDecaySchedulerConfig,
 )
 import warp as wp
-from toad.optimization.atap_loss import ATAPLoss
+from toad.optimization.atap_loss import ATAPLoss,ATAPConfig
 from toad.utils import *
 import toad.transforms as vtf
 import trimesh
@@ -32,27 +32,28 @@ from typing import Tuple
 from nerfstudio.model_components.losses import depth_ranking_loss
 from toad.optimization.utils import *
 from toad.optimization.observation import PosedObservation, VideoSequence, Frame
-from tqdm.notebook import tqdm
+from tqdm import tqdm
+from dataclasses import dataclass
 
-class RigidGroupOptimizer:
+@dataclass
+class RigidGroupOptimizerConfig:
     use_depth: bool = True
-    rank_loss_mult: float = 0.1
+    rank_loss_mult: float = 0.5
     rank_loss_erode: int = 3
     depth_ignore_threshold: float = 0.1  # in meters
-    use_atap: bool = True
+    atap_config: ATAPConfig = ATAPConfig()
     use_roi: bool = True
     roi_inflate: float = 0.25
     pose_lr: float = 0.005
     pose_lr_final: float = 0.001
-    mask_hands: bool = False
+    mask_hands: bool = True
     do_obj_optim: bool = True
     blur_kernel_size: int = 5
 
-    init_p2o: torch.Tensor
-    """From: part, To: object. in current world frame. Part frame is centered at part centroid, and object frame is centered at object centroid."""
-
+class RigidGroupOptimizer:
     def __init__(
         self,
+        config: RigidGroupOptimizerConfig,
         dig_model: DiGModel,
         dino_loader: DinoDataloader,
         group_masks: List[torch.Tensor],
@@ -64,6 +65,7 @@ class RigidGroupOptimizer:
         This one takes in a list of gaussian ID masks to optimize local poses for
         Each rigid group can be optimized independently, with no skeletal constraints
         """
+        self.config = config
         self.dataset_scale = dataset_scale
         self.is_initialized = False
         self.hand_lefts = []#list of bools for each hand frame
@@ -86,16 +88,15 @@ class RigidGroupOptimizer:
             [1, 0, 0, 0], dtype=torch.float32, device="cuda"
         )
         self.part_deltas = torch.nn.Parameter(self.part_deltas)
-        k = self.blur_kernel_size
+        k = self.config.blur_kernel_size
         s = 0.3 * ((k - 1) * 0.5 - 1) + 0.8
         self.blur = kornia.filters.GaussianBlur2d((k, k), (s, s))
-        self.part_optimizer = torch.optim.Adam([self.part_deltas], lr=self.pose_lr)
+        self.part_optimizer = torch.optim.Adam([self.part_deltas], lr=self.config.pose_lr)
         #hand_frames stores a list of hand vertices and faces for each keyframe, stored in the OBJECT COORDINATE FRAME
         self.hand_frames = []
         # lock to prevent blocking the render thread if provided
         self.render_lock = render_lock
-        if self.use_atap:
-            self.atap = ATAPLoss(dig_model, group_masks, group_labels, self.dataset_scale)
+        self.atap = ATAPLoss(self.config.atap_config, dig_model, group_masks, group_labels, self.dataset_scale)
         self.init_means = self.dig_model.gauss_params["means"].detach().clone()
         self.init_quats = self.dig_model.gauss_params["quats"].detach().clone()
         # Save the initial object to world transform, and initial part to object transforms
@@ -127,7 +128,7 @@ class RigidGroupOptimizer:
             optimizer = torch.optim.Adam([whole_pose_adj], lr=lr)
             scheduler = ExponentialDecayScheduler(
                         ExponentialDecaySchedulerConfig(
-                            lr_final=self.pose_lr_final, max_steps=niter,
+                            lr_final=.005, max_steps=niter,
                         )
             ).get_scheduler(optimizer, lr)
             if roi: 
@@ -182,7 +183,7 @@ class RigidGroupOptimizer:
         ys, xs, best_pix = find_pixel()
         obj_centroid = self.dig_model.means.mean(dim=0, keepdim=True)  # 1x3
         ray = self.sequence.get_last_frame().frame.camera.generate_rays(0, best_pix)
-        dist = 1
+        dist = .4
         point = ray.origins + ray.directions * dist
         for z_rot in tqdm(np.linspace(0, np.pi * 2, n_seeds),"Trying seeds..."):
             whole_pose_adj = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
@@ -205,9 +206,9 @@ class RigidGroupOptimizer:
             )
         best_outputs = self.dig_model.get_outputs(self.sequence.get_last_frame().frame.camera)
         self.obj_delta = best_pose[None].contiguous()
-        if self.do_obj_optim:
+        if self.config.do_obj_optim:
             self.obj_delta.requires_grad_(True)
-            self.obj_optimizer = torch.optim.Adam([self.obj_delta], lr=self.pose_lr)
+            self.obj_optimizer = torch.optim.Adam([self.obj_delta], lr=self.config.pose_lr)
         self.is_initialized = True
         return xs, ys, best_outputs, renders
     
@@ -283,7 +284,6 @@ class RigidGroupOptimizer:
             .squeeze()
             .permute(1, 2, 0)
         )
-        dino_feats = torch.where(object_mask,dig_outputs["dino"],dino_feats)
         if use_hand_mask:
             loss = (frame.dino_feats - dino_feats)[frame.hand_mask].norm(dim=-1).mean()
         else:
@@ -297,18 +297,18 @@ class RigidGroupOptimizer:
                     valids = valids & frame.hand_mask.unsqueeze(-1)
                 pix_loss = (physical_depth - frame.depth) ** 2
                 pix_loss = pix_loss[
-                    valids & (pix_loss < self.depth_ignore_threshold**2)
+                    valids & (pix_loss < self.config.depth_ignore_threshold**2)
                 ]
                 loss = loss + pix_loss.mean()
             else:
                 # This is ranking loss for monodepth (which is disparity)
                 frame_depth = 1 / frame.depth # convert disparity to depth
-                N = 30000
+                N = 20000
                 # erode the mask by like 10 pixels
                 object_mask = object_mask & (~frame_depth.isnan())
                 # commenting this out for now since it sometimes crashes with no valid pixels
                 object_mask = kornia.morphology.erosion(
-                    object_mask.squeeze().unsqueeze(0).unsqueeze(0).float(), torch.ones((self.rank_loss_erode, self.rank_loss_erode), device='cuda')
+                    object_mask.squeeze().unsqueeze(0).unsqueeze(0).float(), torch.ones((self.config.rank_loss_erode, self.config.rank_loss_erode), device='cuda')
                 ).squeeze().bool()
                 if use_hand_mask:
                     object_mask = object_mask & frame.hand_mask
@@ -324,7 +324,7 @@ class RigidGroupOptimizer:
                     rend_samples = dig_outputs["depth"][rand_samples]
                     mono_samples = frame_depth[rand_samples]
                     rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                    loss = loss + self.rank_loss_mult*rank_loss
+                    loss = loss + self.config.rank_loss_mult*rank_loss
         if use_rgb:
             loss = loss + 0.05 * (dig_outputs["rgb"] - frame.rgb).abs().mean()
         if use_atap:
@@ -349,23 +349,23 @@ class RigidGroupOptimizer:
         )
         return loss[active_timesteps].sum()
     
-    def step(self, niter=1, use_depth=True, use_rgb=False, all_frames = False):
-        lr_init = self.pose_lr
+    def step(self, niter=1, all_frames = False):
+        lr_init = self.config.pose_lr
         n_warmup = 5 if all_frames else 0
         if all_frames:
             # reset the optimizers
-            self.part_optimizer = torch.optim.Adam([self.part_deltas], lr=self.pose_lr)
-            if self.do_obj_optim:
-                self.obj_optimizer = torch.optim.Adam([self.obj_delta], lr=self.pose_lr)
+            self.part_optimizer = torch.optim.Adam([self.part_deltas], lr=self.config.pose_lr)
+            if self.config.do_obj_optim:
+                self.obj_optimizer = torch.optim.Adam([self.obj_delta], lr=self.config.pose_lr)
         part_scheduler = ExponentialDecayScheduler(
             ExponentialDecaySchedulerConfig(
-                lr_final=self.pose_lr_final, max_steps=niter, warmup_steps = n_warmup, ramp='linear', lr_pre_warmup = 1e-5
+                lr_final=self.config.pose_lr_final, max_steps=niter, warmup_steps = n_warmup, ramp='linear', lr_pre_warmup = 1e-5
             )
         ).get_scheduler(self.part_optimizer, lr_init)
-        if self.do_obj_optim:
+        if self.config.do_obj_optim:
             obj_scheduler = ExponentialDecayScheduler(
                 ExponentialDecaySchedulerConfig(
-                    lr_final=self.pose_lr_final, max_steps=niter, warmup_steps = n_warmup, ramp='linear', lr_pre_warmup = 1e-5
+                    lr_final=self.config.pose_lr_final, max_steps=niter, warmup_steps = n_warmup, ramp='linear', lr_pre_warmup = 1e-5
                 )
             ).get_scheduler(self.obj_optimizer, lr_init)
         for _ in range(niter):
@@ -374,7 +374,7 @@ class RigidGroupOptimizer:
                 self.part_deltas[..., 3:] = self.part_deltas[..., 3:] / self.part_deltas[..., 3:].norm(dim=-1, keepdim=True)
                 self.obj_delta[..., 3:] = self.obj_delta[..., 3:] / self.obj_delta[..., 3:].norm(dim=-1,keepdim=True)
             self.part_optimizer.zero_grad()
-            if self.do_obj_optim:
+            if self.config.do_obj_optim:
                 self.obj_optimizer.zero_grad()
             # Compute loss
             frame_ids_to_optimize = list(range(len(self.sequence))) if all_frames else [-1]
@@ -384,9 +384,9 @@ class RigidGroupOptimizer:
                     this_obj_delta = self.obj_delta[idx]
                     this_part_deltas = self.part_deltas[idx]
                     observation = self.sequence.get_frame(idx)
-                    frame = observation.frame if not self.use_roi else observation.roi_frame
+                    frame = observation.frame if not self.config.use_roi else observation.roi_frame
                     loss = self.get_optim_loss(frame, this_obj_delta, this_part_deltas, 
-                        use_depth, use_rgb, self.use_atap, self.mask_hands, self.do_obj_optim)
+                        self.config.use_depth, False, self.config.atap_config.use_atap, self.config.mask_hands, self.config.do_obj_optim)
                 loss.backward()
                 #tape backward needs to be after loss backward since loss backward propagates gradients to the outputs of warp kernels
                 tape.backward()
@@ -395,14 +395,14 @@ class RigidGroupOptimizer:
             if all_frames:
                 tape = wp.Tape()
                 with tape:
-                    part_smoothness= 0.1 * self.get_smoothness_loss(self.part_deltas, 1.0, 1.0, frame_ids_to_optimize)
-                    obj_smoothness = 0.1 * self.get_smoothness_loss(self.obj_delta, 1.0, 1.0, frame_ids_to_optimize)
+                    part_smoothness= .1 * self.get_smoothness_loss(self.part_deltas, 1.0, 1.0, frame_ids_to_optimize)
+                    obj_smoothness = .1 * self.get_smoothness_loss(self.obj_delta, 1.0, 1.0, frame_ids_to_optimize)
                 print("Traj smoothness penalty (pos, rot)", part_smoothness.item(), obj_smoothness.item())
                 (part_smoothness + obj_smoothness).backward()
                 tape.backward()
             self.part_optimizer.step()
             part_scheduler.step()
-            if self.do_obj_optim:
+            if self.config.do_obj_optim:
                 self.obj_optimizer.step()
                 obj_scheduler.step()
         with torch.no_grad():
@@ -487,6 +487,7 @@ class RigidGroupOptimizer:
         self.obj_delta = data['obj_delta'].cuda()
         self.hand_frames = data['hand_frames']
         self.hand_lefts = data['hand_lefts']
+        self.is_initialized = True
     
     def compute_single_hand_assignment(self) -> List[int]:
         """
@@ -573,8 +574,8 @@ class RigidGroupOptimizer:
             valids = torch.where(object_mask)
             valid_xs = valids[1]/object_mask.shape[1]
             valid_ys = valids[0]/object_mask.shape[0]#normalize to 0-1
-            inflate_amnt = (self.roi_inflate*(valid_xs.max() - valid_xs.min()).item(),
-                            self.roi_inflate*(valid_ys.max() - valid_ys.min()).item())# x, y
+            inflate_amnt = (self.config.roi_inflate*(valid_xs.max() - valid_xs.min()).item(),
+                            self.config.roi_inflate*(valid_ys.max() - valid_ys.min()).item())# x, y
             xmin, xmax, ymin, ymax = max(0,valid_xs.min().item() - inflate_amnt[0]), min(1,valid_xs.max().item() + inflate_amnt[0]),\
                                 max(0,valid_ys.min().item() - inflate_amnt[1]), min(1,valid_ys.max().item() + inflate_amnt[1])
             return xmin, xmax, ymin, ymax
@@ -585,7 +586,7 @@ class RigidGroupOptimizer:
         rgb_frame: HxWxC tensor image
         """
         assert self.is_initialized, "Must initialize first with the first frame"
-        if self.use_roi:
+        if self.config.use_roi:
             xmin, xmax, ymin, ymax = self.calculate_roi(frame.frame.camera)
             frame.set_roi(xmin, xmax, ymin, ymax)
         self.sequence.add_frame(frame)
@@ -601,6 +602,6 @@ class RigidGroupOptimizer:
             self.part_deltas = torch.nn.Parameter(torch.cat([self.part_deltas, self.part_deltas[-1].unsqueeze(0)], dim=0))
         append_in_optim(self.part_optimizer, [self.part_deltas])
         zero_optim_state(self.part_optimizer, [-2])
-        if self.do_obj_optim:
+        if self.config.do_obj_optim:
             append_in_optim(self.obj_optimizer, [self.obj_delta])
             zero_optim_state(self.obj_optimizer, [-2])

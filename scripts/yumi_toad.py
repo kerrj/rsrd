@@ -190,7 +190,7 @@ def create_objects_in_scene(
                 curry_mesh(i)
     
     # Need to filter small object parts...
-    pose_deltas = toad_opt.optimizer.pose_deltas
+    pose_deltas = toad_opt.optimizer.part_deltas
     foo = torch.stack(toad_opt.optimizer.keyframes)
     bar = foo[:, :, :3, 3]
     baz = (bar[1:] - bar[:-1]).norm(dim=-1).sum(dim=0)

@@ -3,7 +3,7 @@ import numpy as np
 from typing import List
 from lerf.dig import DiGModel
 import warp as wp
-
+from dataclasses import dataclass
 #https://openaccess.thecvf.com/content_CVPR_2019/papers/Barron_A_General_and_Adaptive_Robust_Loss_Function_CVPR_2019_paper.pdf
 @wp.func
 def jon_loss(x: float,alpha:float, c:float):
@@ -22,18 +22,24 @@ def atap_loss(cur_means: wp.array(dtype = wp.vec3), dists: wp.array(dtype = floa
     con_weight = connectivity_weights[gid1,gid2]
     curdist = wp.length(cur_means[id1] - cur_means[id2])
     loss[tid] = jon_loss(curdist - dists[tid], alpha, 0.001) * con_weight * .001
-    
 
-class ATAPLoss:
+@dataclass
+class ATAPConfig:
+    use_atap: bool = True
     touch_radius: float = .0015
     N: int = 500
     loss_mult: float = .1
     loss_alpha: float = 1.0#rule: for jointed, use 1.0 alpha, for non-jointed use 0.1 ish
-    def __init__(self, dig_model: DiGModel, group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float = 1.0):
+
+class ATAPLoss:
+    def __init__(self, config: ATAPConfig, dig_model: DiGModel, group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float = 1.0):
         """
         Initializes the data structure to compute the loss between groups touching
         """
-        self.touch_radius = self.touch_radius * dataset_scale
+        self.config = config
+        if not self.config.use_atap:
+            return
+        self.touch_radius = config.touch_radius * dataset_scale
         print(f"Touch radius is {self.touch_radius}")
         self.dig_model = dig_model
         self.group_masks = group_masks
@@ -65,7 +71,7 @@ class ATAPLoss:
 
         returns: a differentiable loss
         """
-        if len(self.group_masks) == 1:
+        if len(self.group_masks) == 1 or not self.config.use_atap:
             return torch.tensor(0.0,device='cuda')
         if self.dists.shape[0] == 0:
             return torch.tensor(0.0,device='cuda')
@@ -76,9 +82,9 @@ class ATAPLoss:
             kernel = atap_loss,
             inputs = [wp.from_torch(self.dig_model.gauss_params['means'],dtype=wp.vec3),wp.from_torch(self.dists),
                       wp.from_torch(self.ids),wp.from_torch(self.match_ids),wp.from_torch(self.group_ids1),
-                      wp.from_torch(self.group_ids2),wp.from_torch(connectivity_weights),loss, self.loss_alpha]
+                      wp.from_torch(self.group_ids2),wp.from_torch(connectivity_weights),loss, self.config.loss_alpha]
         )
-        return (wp.to_torch(loss)/self.num_pairs).sum()*self.loss_mult
+        return (wp.to_torch(loss)/self.num_pairs).sum()*self.config.loss_mult
         
 
     def _radius_nn(self, group_mask: torch.Tensor, r: float):
@@ -90,7 +96,7 @@ class ATAPLoss:
         for i,grp in enumerate(self.group_masks):
             global_group_ids[grp] = i
         from cuml.neighbors import NearestNeighbors
-        model = NearestNeighbors(n_neighbors=self.N)
+        model = NearestNeighbors(n_neighbors=self.config.N)
         means = self.dig_model.means.detach().cpu().numpy()
         model.fit(means)
         dists, match_ids = model.kneighbors(means)
@@ -100,7 +106,7 @@ class ATAPLoss:
         match_ids[dists>r] = -1
         # filter out ones within same group mask
         match_ids[group_mask[match_ids]] = -1
-        ids = torch.arange(self.dig_model.num_points,dtype=torch.long,device='cuda')[group_mask].unsqueeze(-1).repeat(1,self.N)
+        ids = torch.arange(self.dig_model.num_points,dtype=torch.long,device='cuda')[group_mask].unsqueeze(-1).repeat(1,self.config.N)
         #flatten all the ids/dists/match_ids
         ids = ids[match_ids!=-1].flatten()
         dists = dists[match_ids!=-1].flatten()

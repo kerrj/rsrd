@@ -5,8 +5,8 @@ import numpy as np
 from PIL import Image
 from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
 
-da_image_processor = AutoImageProcessor.from_pretrained("LiheYoung/depth-anything-small-hf")
-da_model = AutoModelForDepthEstimation.from_pretrained("LiheYoung/depth-anything-small-hf")
+da_image_processor = AutoImageProcessor.from_pretrained("depth-anything/Depth-Anything-V2-Base-hf")
+da_model = AutoModelForDepthEstimation.from_pretrained("depth-anything/Depth-Anything-V2-Base-hf")
 da_model.to('cuda')
 def get_depth(img: Union[torch.tensor,np.ndarray]):
     assert img.shape[2] == 3

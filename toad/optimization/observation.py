@@ -85,6 +85,7 @@ class Frame:
                 ).squeeze()
                 == 0.0
             )
+            return hand_mask
         self._hand_mask = Future(_get_hand_mask)
         
 
@@ -93,17 +94,12 @@ class PosedObservation:
     """
     Class for computing relevant data products for a frame and storing them
     """
-    rasterize_resolution: int = 504
+    rasterize_resolution: int = 490
     _frame: Frame
     _raw_rgb: torch.Tensor
     _original_camera: Cameras
     _original_depth: Optional[torch.Tensor] = None
     _roi_frame: Optional[Frame] = None
-
-    """
-    TODO for roi; 
-    1. make rgb, depth, camera properties which are computed LAZILY when roi is changed
-    """
     
     def __init__(self, rgb: torch.Tensor, camera: Cameras, dino_fn: Callable, metric_depth_img: Optional[torch.Tensor] = None):
         """
