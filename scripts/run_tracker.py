@@ -31,6 +31,69 @@ import trimesh
 import tyro
 from dataclasses import dataclass
 import datetime
+from viser import transforms as vtf
+
+def animate_traj(optimizer:RigidGroupOptimizer, output_path: Optional[Path] = None):
+    from viser import ViserServer
+    gs_viser = ViserServer()
+    optimizer.reset_transforms()
+    dig_model = optimizer.dig_model
+    Rs = vtf.SO3(dig_model.quats.cpu().numpy()).as_matrix()
+    covariances = np.einsum(
+        "nij,njk,nlk->nil", Rs, np.eye(3)[None, :, :] * dig_model.scales.detach().exp().cpu().numpy()[:, None, :] ** 2, Rs
+    )
+    rec = gs_viser._start_scene_recording()
+    gs_viser.scene.world_axes.remove()
+    p = optimizer.obj_delta[0,0].detach().cpu().numpy()
+    init_obj_se3 = vtf.SE3.from_rotation_and_translation(vtf.SO3(p[3:]),p[:3])
+    obj_frame = gs_viser.scene.add_frame("/object",show_axes=True, axes_length=.1,axes_radius=.01)
+    delta_frames = []
+    for i in range(optimizer.part_deltas.shape[1]):
+        p2o_7vec = optimizer.init_p2o_7vec[i].cpu().numpy()
+        gs_viser.scene.add_frame(f"/object/part{i}",position=p2o_7vec[:3],wxyz=p2o_7vec[3:],show_axes=False)
+        frame = gs_viser.scene.add_frame(f"/object/part{i}/delta",show_axes=True,axes_length=.1,axes_radius=.005)
+        delta_frames.append(frame)
+        group_mask = optimizer.group_masks[i].cpu().numpy()
+        shifted_centers = dig_model.means.detach()[group_mask]-dig_model.means.detach()[group_mask].mean(dim=0)
+        gs_viser.scene._add_gaussian_splats(
+                f"/object/part{i}/delta/gaussians",
+                centers=shifted_centers.cpu().numpy(),
+                rgbs=torch.clamp(dig_model.colors, 0.0, 1.0).detach()[group_mask].cpu().numpy(),
+                opacities=dig_model.opacities.sigmoid().detach()[group_mask].cpu().numpy(),
+                covariances=covariances[group_mask],
+            )
+    rec.set_loop_start()
+    for t in range(optimizer.part_deltas.shape[0]):
+        for i in range(optimizer.part_deltas.shape[1]):
+            p = optimizer.obj_delta[t,0].detach().cpu().numpy()
+            obj_delta = init_obj_se3.inverse() @ vtf.SE3.from_rotation_and_translation(vtf.SO3(p[3:]),p[:3])
+            delta = optimizer.part_deltas[t,i].detach().cpu().numpy()
+            with gs_viser.atomic():
+                obj_frame.wxyz = obj_delta.rotation().wxyz
+                obj_frame.position = obj_delta.translation()
+                delta_frames[i].position = delta[:3]
+                delta_frames[i].wxyz = delta[3:]
+        rec.insert_sleep(1/30)
+    bs = rec.end_and_serialize()
+    if output_path is not None:
+        (output_path/"animation.viser").write_bytes(bs)
+    animate_button = gs_viser.gui.add_button("Download Animation")
+    @animate_button.on_click
+    def _(_):
+        gs_viser.send_file_download("animation.viser",bs)
+    while True:
+        for t in range(optimizer.part_deltas.shape[0]):
+            for i in range(optimizer.part_deltas.shape[1]):
+                p = optimizer.obj_delta[t,0].detach().cpu().numpy()
+                obj_delta = init_obj_se3.inverse() @ vtf.SE3.from_rotation_and_translation(vtf.SO3(p[3:]),p[:3])
+                delta = optimizer.part_deltas[t,i].detach().cpu().numpy()
+                with gs_viser.atomic():
+                    obj_frame.wxyz = obj_delta.rotation().wxyz
+                    obj_frame.position = obj_delta.translation()
+                    delta_frames[i].position = delta[:3]
+                    delta_frames[i].wxyz = delta[3:]
+            time.sleep(1/30)
+        time.sleep(.5)
 
 def get_hands(handreg, frame, framedepth, optimizer, outputs) -> Tuple[Optional[List[trimesh.Trimesh]],Optional[List[trimesh.Trimesh]]]:
     left_hand,right_hand = handreg.detect_hands(frame,optimizer.init_c2w.fx.item()*(max(frame.shape[0],frame.shape[1])/PosedObservation.rasterize_resolution))
@@ -78,15 +141,16 @@ def get_vid_frame(cap,timestamp):
 @dataclass
 class ExperimentConfig:
     load_keyframes: bool = False
-    camera_input: Literal['iphone_vertical','iphone','gopro','mx_iphone'] = 'mx_iphone'
-    video_file: Path = Path("motion_vids/stapler2.MOV")
-    time_bounds: Tuple[float,float] = (0,4)
+    camera_input: Literal['iphone_vertical','iphone','gopro','mx_iphone'] = 'iphone'
+    video_file: Path = Path("motion_vids/buddha_empty_close.MOV")
+    time_bounds: Tuple[float,float] = (0,3.5)
     fps: int = 30
-    dig_config: Path =Path("outputs/articulated_objects/dig/2024-07-15_205720/config.yml")
-    # Path("outputs/sunglasses3/dig/2024-07-03_225001/config.yml")#vit-l with 64 dim
+    dig_config: Path = Path("outputs/buddha_empty/dig/2024-07-03_195352/config.yml")#vit-l with 64 dim
+    #Path("outputs/sunglasses3/dig/2024-07-03_225001/config.yml")#vit-l with 64 dim
+    #Path("outputs/sunglasses3/dig/2024-07-17_215116/config.yml")#no antialiasing
+    #Path("outputs/sunglasses3/dig/2024-07-03_225001/config.yml")#vit-l with 64 dim
+    #Path("outputs/articulated_objects/dig/2024-07-15_205720/config.yml")
     # Path("outputs/nerfgun_poly_far/dig/2024-07-03_211551/config.yml")#vit-l with 64 dim
-    # Path("outputs/buddha_empty/dig/2024-07-03_195352/config.yml")#vit-l with 64 dim
-    # 
     # dig_config = Path("outputs/purple_flower/dig/2024-07-03_200636/config.yml")#vit-l with 64 dim
     # dig_config = Path("outputs/lens_cleaner/dig/2024-07-04_183148/config.yml")
     # dig_config = Path("outputs/left_shoe/dig/2024-07-08_211329/config.yml")
@@ -135,7 +199,6 @@ def main(exp: ExperimentConfig):
     cam_pose = None
     if cam_pose is None:
         H = np.eye(4)
-        from viser import transforms as vtf
         H[:3,:3] = vtf.SO3.from_x_radians(np.pi/4).as_matrix()
         cam_pose = torch.from_numpy(H).float()[None,:3,:]
     if exp.camera_input == 'iphone':
@@ -298,8 +361,10 @@ def main(exp: ExperimentConfig):
     def smooth_traj(_):
         if len(optimizer.sequence) == optimizer.part_deltas.shape[0]:
             optimizer.step(all_frames=True,niter=50)
+            optimizer.save_trajectory(exp.output_folder / "keyframes.pt")
         else:
             print("Please load all frames first!")
+    animate_traj(optimizer,exp.output_folder)
 
     print("Finished tracking!")
     while True:

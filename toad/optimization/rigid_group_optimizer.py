@@ -38,7 +38,7 @@ from dataclasses import dataclass
 @dataclass
 class RigidGroupOptimizerConfig:
     use_depth: bool = True
-    rank_loss_mult: float = 0.5
+    rank_loss_mult: float = 0.2
     rank_loss_erode: int = 3
     depth_ignore_threshold: float = 0.1  # in meters
     atap_config: ATAPConfig = ATAPConfig()
@@ -46,7 +46,7 @@ class RigidGroupOptimizerConfig:
     roi_inflate: float = 0.25
     pose_lr: float = 0.005
     pose_lr_final: float = 0.001
-    mask_hands: bool = True
+    mask_hands: bool = False
     do_obj_optim: bool = True
     blur_kernel_size: int = 5
 
@@ -110,7 +110,7 @@ class RigidGroupOptimizer:
         self.init_p2o_7vec[:,3] = 1.0
         for i,g in enumerate(self.group_masks):
             gp_centroid = self.init_means[g].mean(dim=0)
-            self.init_p2o_7vec[i,:3] = gp_centroid
+            self.init_p2o_7vec[i,:3] = gp_centroid - self.init_means.mean(dim=0)
             self.init_p2o[i,:,:] = vtf.SE3.from_rotation_and_translation(
                 vtf.SO3.identity(dtype=torch.float32,device='cuda'), (gp_centroid - self.init_means.mean(dim=0))
             ).as_matrix()
@@ -183,7 +183,7 @@ class RigidGroupOptimizer:
         ys, xs, best_pix = find_pixel()
         obj_centroid = self.dig_model.means.mean(dim=0, keepdim=True)  # 1x3
         ray = self.sequence.get_last_frame().frame.camera.generate_rays(0, best_pix)
-        dist = .4
+        dist = 2
         point = ray.origins + ray.directions * dist
         for z_rot in tqdm(np.linspace(0, np.pi * 2, n_seeds),"Trying seeds..."):
             whole_pose_adj = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
@@ -279,11 +279,12 @@ class RigidGroupOptimizer:
             object_mask = dig_outputs["accumulation"] > 0.8
         if not object_mask.any():
             return None
-        dino_feats = (
+        blurred_dino_feats = (
             self.blur(dig_outputs["dino"].permute(2, 0, 1)[None])
             .squeeze()
             .permute(1, 2, 0)
         )
+        dino_feats = torch.where(object_mask, dig_outputs["dino"], blurred_dino_feats)
         if use_hand_mask:
             loss = (frame.dino_feats - dino_feats)[frame.hand_mask].norm(dim=-1).mean()
         else:
@@ -333,7 +334,8 @@ class RigidGroupOptimizer:
             loss = loss + atap_loss
         if do_obj_optim:
             # add regularizer on the parts to not move much
-            loss = loss + 0.005 * part_deltas[:,:3].norm(dim=-1).mean() + .005 * 2 * torch.acos(0.99*part_deltas[:,3]).mean()
+            loss = loss + 0.01 * part_deltas[:,:3].norm(dim=-1).mean() + .01 * part_deltas[:,3:6].norm(dim=-1).mean()
+            loss = loss + 0.001 * obj_delta[:,:3].norm(dim=-1).mean() + .001 * obj_delta[:,3:6].norm(dim=-1).mean()
         return loss
     
     def get_smoothness_loss(self, deltas: torch.Tensor, position_lambda: float, rotation_lambda: float, active_timesteps = slice(None)):
@@ -395,7 +397,7 @@ class RigidGroupOptimizer:
             if all_frames:
                 tape = wp.Tape()
                 with tape:
-                    part_smoothness= .1 * self.get_smoothness_loss(self.part_deltas, 1.0, 1.0, frame_ids_to_optimize)
+                    part_smoothness= .2 * self.get_smoothness_loss(self.part_deltas, 1.0, 1.0, frame_ids_to_optimize)
                     obj_smoothness = .1 * self.get_smoothness_loss(self.obj_delta, 1.0, 1.0, frame_ids_to_optimize)
                 print("Traj smoothness penalty (pos, rot)", part_smoothness.item(), obj_smoothness.item())
                 (part_smoothness + obj_smoothness).backward()
