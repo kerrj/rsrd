@@ -55,10 +55,11 @@ EXPERIMENTS = {
         "renders/big_painter_t/keyframes.pt",
         "bimanual"
     ),
-    # "wooden_drawer": (
-    #     "outputs/wooden_drawer/dig/2024-06-03_160055/config.yml",
-    #     "renders/wooden_drawer/keyframes.pt"
-    #     ),
+    "wooden_drawer": (
+        "outputs/wooden_drawer/dig/2024-06-03_160055/config.yml",
+        "renders/wooden_drawer/keyframes.pt",
+        "single"
+        ),
 }
 
 
@@ -117,67 +118,73 @@ def generate_path_single(
             if found_traj:
                 break
 
-            q_right_rest = robot.q_right_home.view(l_moving_ik[l_idx].shape).cuda()
-            d_world, d_self = robot.plan.in_collision_full(
-                robot.concat_joints(q_right_rest, l_moving_ik[l_idx])
-            )
-            if d_self <= 0 and d_world <= d_world_thresh:
+            # q_right_rest = robot.q_right_home.view(l_moving_ik[l_idx].shape).cuda()
+            # d_world, d_self = robot.plan.in_collision_full(
+            #     robot.concat_joints(q_right_rest, l_moving_ik[l_idx])
+            # )
+            # if d_self <= 0 and d_world <= d_world_thresh:
                 # check if waypoint works.
-                l_waypoint_traj, l_waypoint_succ = robot.plan_jax.plan_from_waypoints(
-                    poses=torch.cat(
-                        [
-                            moving_grasp_path_wxyz_xyz_gripper_approach[l_idx],
-                            moving_grasp_path_wxyz_xyz_gripper[l_idx],
-                        ]
-                    ).unsqueeze(0),
-                    arm="left",
-                )
+            l_waypoint_traj, l_waypoint_succ = robot.plan_jax.plan_from_waypoints(
+                poses=torch.cat(
+                    [
+                        moving_grasp_path_wxyz_xyz_gripper_approach[l_idx],
+                        moving_grasp_path_wxyz_xyz_gripper[l_idx],
+                    ]
+                ).unsqueeze(0),
+                arm="left",
+            )
 
-                # check that the approach part is collision-free.
-                q_right_rest = robot.q_right_home.view(-1, 8).expand(l_waypoint_traj.shape[1], -1).cuda()
-                _approach_traj = robot.concat_joints(
-                    q_right_rest, l_waypoint_traj.squeeze()
-                )[: moving_grasp_path_wxyz_xyz_gripper_approach.shape[1]]
-                d_world, d_self = robot.plan.in_collision_full(_approach_traj)
-                if (d_world > d_world_thresh).any():
-                    continue
+            # check that the approach part is collision-free.
+            robot.plan.update_world_objects()
+            q_right_rest = robot.q_right_home.view(-1, 8).expand(l_waypoint_traj.shape[1], -1).cuda()
+            _approach_traj = robot.concat_joints(
+                q_right_rest, l_waypoint_traj.squeeze()
+            )[: moving_grasp_path_wxyz_xyz_gripper_approach.shape[1]]
+            d_world, d_self = robot.plan.in_collision_full(_approach_traj)
+            robot.plan.update_world_objects(mesh_curobo_config)
 
-                if not l_waypoint_succ.any():
-                    continue
+            if (d_world > d_world_thresh).any():
+                continue
 
-                # check if the waypoints cause the arms to collide with one another.
-                waypoint_traj = robot.concat_joints(q_right_rest, l_waypoint_traj.squeeze())
-                d_world, d_self = robot.plan.in_collision_full(waypoint_traj)
+            if not l_waypoint_succ.any():
+                continue
 
-                if (d_self > 0).any():
-                    continue
+            # check if the waypoints cause the arms to collide with one another.
+            robot.plan.update_world_objects()
+            waypoint_traj = robot.concat_joints(q_right_rest, l_waypoint_traj.squeeze())
+            d_world, d_self = robot.plan.in_collision_full(waypoint_traj)
+            robot.plan.update_world_objects(mesh_curobo_config)
 
-                robot.plan.activate_arm("left", locked_arm_q=robot.q_right_home)
-                l_approach_traj, l_approach_succ = robot.plan.gen_motion_from_goal_joints(
-                    goal_js=l_waypoint_traj[0, 0, :].unsqueeze(0),  # [num_traj, 8]
-                    q_init=robot.q_left_home.view(-1, 8),
-                )
+            if (d_self > 0).any():
+                continue
 
-                if l_approach_succ is None or l_approach_traj is None:
-                    continue
-                if not l_approach_succ.any():
-                    continue
+            robot.plan.activate_arm("left", locked_arm_q=robot.q_right_home)
+            l_approach_traj, l_approach_succ = robot.plan.gen_motion_from_goal_joints(
+                goal_js=l_waypoint_traj[0, 0, :].unsqueeze(0),  # [num_traj, 8]
+                q_init=robot.q_left_home.view(-1, 8),
+            )
 
-                q_right_rest = robot.q_right_home.view(-1, 8).expand(l_approach_traj.shape[1], -1).cuda()
-                approach_traj = robot.concat_joints(q_right_rest, l_approach_traj.squeeze())
-                d_world, d_self = robot.plan.in_collision_full(approach_traj)
+            if l_approach_succ is None or l_approach_traj is None:
+                continue
+            if not l_approach_succ.any():
+                continue
 
-                if (d_self > 0).any():
-                    continue
+            # q_right_rest = robot.q_right_home.view(-1, 8).expand(l_approach_traj.shape[1], -1).cuda()
+            q_right_rest = robot.q_right_home.view(-1, 8).expand(l_approach_traj.shape[1], -1).cuda()
+            approach_traj = robot.concat_joints(q_right_rest, l_approach_traj.squeeze())
+            # d_world, d_self = robot.plan.in_collision_full(approach_traj)
 
-                if (
-                    l_approach_succ is not None and l_approach_traj is not None and l_approach_succ.all()
-                ):
-                    # ... it has succeeded.
-                    traj = torch.cat([approach_traj, waypoint_traj], dim=0)
-                    print("Found working traj")
-                    # yield traj
-                    found_traj = True
+            # if (d_self > 0).any():
+            #     continue
+
+            if (
+                l_approach_succ is not None and l_approach_traj is not None and l_approach_succ.all()
+            ):
+                # ... it has succeeded.
+                traj = torch.cat([approach_traj, waypoint_traj], dim=0)
+                print("Found working traj")
+                # yield traj
+                found_traj = True
     if r_moving_ik is not None and r_moving_ik_succ is not None:
         for r_idx in range(r_moving_ik.shape[0]):
             if not r_moving_ik_succ[r_idx]:
@@ -185,67 +192,72 @@ def generate_path_single(
             if found_traj:
                 break
 
-            q_left_rest = robot.q_left_home.view(-1, 8).cuda()
-            d_world, d_self = robot.plan.in_collision_full(
-                robot.concat_joints(r_moving_ik[r_idx], q_left_rest)
+            # q_left_rest = robot.q_left_home.view(-1, 8).cuda()
+            # d_world, d_self = robot.plan.in_collision_full(
+            #     robot.concat_joints(r_moving_ik[r_idx], q_left_rest)
+            # )
+            # if d_self <= 0 and d_world <= d_world_thresh:
+            # check if waypoint works.
+            r_waypoint_traj, r_waypoint_succ = robot.plan_jax.plan_from_waypoints(
+                poses=torch.cat(
+                    [
+                        moving_grasp_path_wxyz_xyz_gripper_approach[r_idx],
+                        moving_grasp_path_wxyz_xyz_gripper[r_idx],
+                    ]
+                ).unsqueeze(0),
+                arm="right",
             )
-            if d_self <= 0 and d_world <= d_world_thresh:
-                # check if waypoint works.
-                r_waypoint_traj, r_waypoint_succ = robot.plan_jax.plan_from_waypoints(
-                    poses=torch.cat(
-                        [
-                            moving_grasp_path_wxyz_xyz_gripper_approach[r_idx],
-                            moving_grasp_path_wxyz_xyz_gripper[r_idx],
-                        ]
-                    ).unsqueeze(0),
-                    arm="right",
-                )
 
-                # check that the approach part is collision-free.
-                q_left_rest = robot.q_left_home.view(-1, 8).expand(r_waypoint_traj.shape[1], -1).cuda()
-                _approach_traj = robot.concat_joints(
-                    q_left_rest, r_waypoint_traj.squeeze()
-                )[: moving_grasp_path_wxyz_xyz_gripper_approach.shape[1]]
-                d_world, d_self = robot.plan.in_collision_full(_approach_traj)
-                if (d_world > d_world_thresh).any():
-                    continue
+            # check that the approach part is collision-free.
+            robot.plan.update_world_objects()
+            q_left_rest = robot.q_left_home.view(-1, 8).expand(r_waypoint_traj.shape[1], -1).cuda()
+            _approach_traj = robot.concat_joints(
+                q_left_rest, r_waypoint_traj.squeeze()
+            )[: moving_grasp_path_wxyz_xyz_gripper_approach.shape[1]]
+            d_world, d_self = robot.plan.in_collision_full(_approach_traj)
+            robot.plan.update_world_objects(mesh_curobo_config)
+            if (d_world > d_world_thresh).any():
+                continue
 
-                if not r_waypoint_succ.any():
-                    continue
+            if not r_waypoint_succ.any():
+                continue
 
-                # check if the waypoints cause the arms to collide with one another.
-                waypoint_traj = robot.concat_joints(r_waypoint_traj.squeeze(), q_left_rest).cuda()
-                d_world, d_self = robot.plan.in_collision_full(waypoint_traj)
+            # check if the waypoints cause the arms to collide with one another.
+            robot.plan.update_world_objects()
+            waypoint_traj = robot.concat_joints(r_waypoint_traj.squeeze(), q_left_rest).cuda()
+            d_world, d_self = robot.plan.in_collision_full(waypoint_traj)
+            robot.plan.update_world_objects(mesh_curobo_config)
 
-                if (d_self > 0).any():
-                    continue
+            if (d_self > 0).any():
+                continue
 
-                robot.plan.activate_arm("right", locked_arm_q=robot.q_left_home)
-                r_approach_traj, r_approach_succ = robot.plan.gen_motion_from_goal_joints(
-                    goal_js=r_waypoint_traj[0, 0, :].unsqueeze(0),  # [num_traj, 8]
-                    q_init=robot.q_right_home.view(-1, 8),
-                )
+            robot.plan.activate_arm("right", locked_arm_q=robot.q_left_home)
+            r_approach_traj, r_approach_succ = robot.plan.gen_motion_from_goal_joints(
+                goal_js=r_waypoint_traj[0, 0, :].unsqueeze(0),  # [num_traj, 8]
+                q_init=robot.q_right_home.view(-1, 8),
+            )
 
-                if r_approach_succ is None:
-                    continue
-                if not r_approach_succ.any():
-                    continue
+            if r_approach_succ is None:
+                continue
+            if not r_approach_succ.any():
+                continue
 
-                q_left_rest = robot.q_left_home.view(-1, 8).expand(r_approach_traj.shape[1], -1).cuda()
-                approach_traj = robot.concat_joints( r_approach_traj.squeeze(), q_left_rest)
-                d_world, d_self = robot.plan.in_collision_full(approach_traj)
+            # q_left_rest = robot.q_left_home.view(-1, 8).expand(r_approach_traj.shape[1], -1).cuda()
+            q_left_rest = robot.q_left_home.view(-1, 8).expand(r_approach_traj.shape[1], -1).cuda()
+            approach_traj = robot.concat_joints( r_approach_traj.squeeze(), q_left_rest)
+            # d_world, d_self = robot.plan.in_collision_full(approach_traj)
 
-                if (d_self > 0).any():
-                    continue
+            # if (d_self > 0).any():
+            #     continue
 
-                if (
-                    r_approach_succ is not None and r_approach_traj is not None and r_approach_succ.all()
-                ):
-                    # ... it has succeeded.
-                    traj = torch.cat([approach_traj, waypoint_traj], dim=0)
-                    print("Found working traj")
-                    # yield traj
-                    found_traj = True
+            if (
+                r_approach_succ is not None and r_approach_traj is not None and r_approach_succ.all()
+            ):
+                # ... it has succeeded.
+                traj = torch.cat([approach_traj, waypoint_traj], dim=0)
+                print("Found working traj")
+                # yield traj
+                found_traj = True
 
     if found_traj is not True or traj is None:
         print("No working trajectory found.")
@@ -272,7 +284,8 @@ def generate_path_bimanual(
     robot: YumiRobot,
     part_idx: int,
     anchor_idx: int,
-    lift_traj: bool = False,
+    server: viser.ViserServer,
+    lift_traj: bool = True,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
     poses_part2cam = toad_opt.get_parts2cam(keyframe=0)
     poses_part2world = [cam_vtf.multiply(pose) for pose in poses_part2cam]
@@ -345,7 +358,7 @@ def generate_path_bimanual(
             anchor_grasp_path_wxyz_xyz_tt,
         ], dim=1)
 
-    robot.plan.update_world_objects()
+    # robot.plan.update_world_objects()
 
     robot.plan.activate_arm("left", locked_arm_q=robot.q_right_home)
     l_moving_ik, l_moving_ik_succ = robot.plan.ik(
@@ -356,7 +369,7 @@ def generate_path_bimanual(
     )
     robot.plan.activate_arm("right", locked_arm_q=robot.q_left_home)
     r_moving_ik, r_moving_ik_succ = robot.plan.ik(
-        goal_wxyz_xyz=moving_grasp_path_wxyz_xyz_tt[:, 0],
+        goal_wxyz_xyz=moving_grasp_path_wxyz_xyz_tt[:, 0],  # [num_traj, timestep, 7], get first timestep.
     )
     r_anchor_ik, r_anchor_ik_succ= robot.plan.ik(
         goal_wxyz_xyz=anchor_grasp_path_wxyz_xyz_tt[:, 0],
@@ -368,6 +381,7 @@ def generate_path_bimanual(
     r_anchor_ik[..., -1] = 0.025
 
     # robot.plan.update_world_objects(mesh_curobo_config)
+    # robot.plan.update_world_objects()
 
     # ... should cache this?
     traj, approach_traj, waypoint_traj = None, None, None
@@ -376,7 +390,9 @@ def generate_path_bimanual(
     # d_world_thresh = 0.02
     l_waypoint_cache, r_waypoint_cache = {}, {}
     if (l_moving_ik is not None and r_anchor_ik is not None and l_moving_ik_succ is not None and r_anchor_ik_succ is not None):
-        print(l_moving_ik[l_moving_ik_succ].shape, r_anchor_ik[r_anchor_ik_succ].shape)
+        # print(l_moving_ik[l_moving_ik_succ].shape, r_anchor_ik[r_anchor_ik_succ].shape, "r anchor")
+        # print(l_moving_ik_succ, r_anchor_ik_succ)
+        # breakpoint()
         for l_idx in range(l_moving_ik.shape[0]):
             if not l_moving_ik_succ[l_idx]:
                 continue
@@ -387,91 +403,96 @@ def generate_path_bimanual(
                     continue
                 if found_traj:
                     break
-                d_world, d_self = robot.plan.in_collision_full(
-                    robot.concat_joints(r_anchor_ik[r_idx], l_moving_ik[l_idx])
+                # d_world, d_self = robot.plan.in_collision_full(
+                #     robot.concat_joints(r_anchor_ik[r_idx], l_moving_ik[l_idx])
+                # )
+                # if d_self <= 0 and d_world <= d_world_thresh:
+                # check if waypoint works.
+                print("Checking waypoints...")
+                if l_idx in l_waypoint_cache:
+                    l_waypoint_traj, l_waypoint_succ = l_waypoint_cache[l_idx]
+                    l_waypoint_traj, l_waypoint_succ = l_waypoint_traj.cuda(), l_waypoint_succ.cuda()
+                else:
+                    l_waypoint_traj, l_waypoint_succ = robot.plan_jax.plan_from_waypoints(
+                        poses=torch.cat([moving_grasp_path_wxyz_xyz_gripper_approach[l_idx], moving_grasp_path_wxyz_xyz_gripper[l_idx]]).unsqueeze(0),
+                        arm="left",
+                    )
+                    l_waypoint_cache[l_idx] = (l_waypoint_traj.cpu(), l_waypoint_succ.cpu())
+
+                if r_idx in r_waypoint_cache:
+                    r_waypoint_traj, r_waypoint_succ = r_waypoint_cache[r_idx]
+                    r_waypoint_succ, r_waypoint_traj = r_waypoint_succ.cuda(), r_waypoint_traj.cuda()
+                else:
+                    r_waypoint_traj, r_waypoint_succ = robot.plan_jax.plan_from_waypoints(
+                        poses=torch.cat([anchor_grasp_path_wxyz_xyz_gripper_approach[r_idx], anchor_grasp_path_wxyz_xyz_gripper[r_idx]]).unsqueeze(0),
+                        arm="right",
+                    )
+                    r_waypoint_cache[r_idx] = (r_waypoint_traj.cpu(), r_waypoint_succ.cpu())
+
+                l_waypoint_traj[..., -1] = 0.025 # gripper fully open.
+                r_waypoint_traj[..., -1] = 0.025 # gripper fully open.
+                # check that the approach part is collision-free.
+
+                robot.plan.update_world_objects()
+                _approach_traj = robot.concat_joints(r_waypoint_traj.squeeze(), l_waypoint_traj.squeeze())[:moving_grasp_path_wxyz_xyz_gripper_approach.shape[1]]
+                d_world, d_self = robot.plan.in_collision_full(_approach_traj)
+                robot.plan.update_world_objects(mesh_curobo_config)
+
+                if (d_world > d_world_thresh).any():
+                    print("World coll fail...")
+                    continue
+
+                if not (l_waypoint_succ & r_waypoint_succ).any():
+                    print("Waypoint fail...")
+                    continue
+
+                # check if the waypoints cause the arms to collide with one another.
+                robot.plan.update_world_objects()
+                waypoint_traj = robot.concat_joints(r_waypoint_traj.squeeze(), l_waypoint_traj.squeeze())
+                d_world, d_self = robot.plan.in_collision_full(waypoint_traj)
+                robot.plan.update_world_objects(mesh_curobo_config)
+
+                if (d_self > 0).any():
+                    print("self coll waypoint fail...")
+                    continue
+
+                robot.plan.activate_arm("left", locked_arm_q=robot.q_right_home)
+                l_approach_traj, l_approach_succ = robot.plan.gen_motion_from_goal_joints(
+                    goal_js=l_waypoint_traj[0, 0, :].unsqueeze(0),  # [num_traj, 8]
+                    q_init=robot.q_left_home.view(-1, 8),
                 )
-                print(d_world, d_self)
-                if d_self <= 0 and d_world <= d_world_thresh:
-                    # check if waypoint works.
-                    print("Checking waypoints...")
-                    if l_idx in l_waypoint_cache:
-                        l_waypoint_traj, l_waypoint_succ = l_waypoint_cache[l_idx]
-                        l_waypoint_traj, l_waypoint_succ = l_waypoint_traj.cuda(), l_waypoint_succ.cuda()
-                    else:
-                        l_waypoint_traj, l_waypoint_succ = robot.plan_jax.plan_from_waypoints(
-                            poses=torch.cat([moving_grasp_path_wxyz_xyz_gripper_approach[l_idx], moving_grasp_path_wxyz_xyz_gripper[l_idx]]).unsqueeze(0),
-                            arm="left",
-                        )
-                        l_waypoint_cache[l_idx] = (l_waypoint_traj.cpu(), l_waypoint_succ.cpu())
+                robot.plan.activate_arm("right", locked_arm_q=robot.q_left_home)
+                r_approach_traj, r_approach_succ = robot.plan.gen_motion_from_goal_joints(
+                    goal_js=r_waypoint_traj[0, 0, :].unsqueeze(0),  # [num_traj, 8]
+                    q_init=robot.q_right_home.view(-1, 8),
+                )
 
-                    if r_idx in r_waypoint_cache:
-                        r_waypoint_traj, r_waypoint_succ = r_waypoint_cache[r_idx]
-                        r_waypoint_succ, r_waypoint_traj = r_waypoint_succ.cuda(), r_waypoint_traj.cuda()
-                    else:
-                        r_waypoint_traj, r_waypoint_succ = robot.plan_jax.plan_from_waypoints(
-                            poses=torch.cat([anchor_grasp_path_wxyz_xyz_gripper_approach[r_idx], anchor_grasp_path_wxyz_xyz_gripper[r_idx]]).unsqueeze(0),
-                            arm="right",
-                        )
-                        r_waypoint_cache[r_idx] = (r_waypoint_traj.cpu(), r_waypoint_succ.cpu())
+                if (l_approach_succ is None or r_approach_succ is None):
+                    print("Approach fail...")
+                    continue
+                if not (l_approach_succ & r_approach_succ).all():
+                    print("Approach fail...")
+                    continue
 
-                    l_waypoint_traj[..., -1] = 0.025 # gripper fully open.
-                    r_waypoint_traj[..., -1] = 0.025 # gripper fully open.
-                    # check that the approach part is collision-free.
-                    _approach_traj = robot.concat_joints(r_waypoint_traj.squeeze(), l_waypoint_traj.squeeze())[:moving_grasp_path_wxyz_xyz_gripper_approach.shape[1]]
-                    d_world, d_self = robot.plan.in_collision_full(_approach_traj)
-                    if (d_world > d_world_thresh).any():
-                        print("World coll fail...")
-                        continue
+                approach_traj = robot.concat_joints(r_approach_traj.squeeze(), l_approach_traj.squeeze())
+                # d_world, d_self = robot.plan.in_collision_full(approach_traj)
 
-                    if not (l_waypoint_succ & r_waypoint_succ).any():
-                        print("Waypoint fail...")
-                        continue
+                # if (d_self > 0).any():
+                #     continue
+                # if (d_world > 0).any():
+                #     continue
 
-                    # check if the waypoints cause the arms to collide with one another.
-                    waypoint_traj = robot.concat_joints(r_waypoint_traj.squeeze(), l_waypoint_traj.squeeze())
-                    d_world, d_self = robot.plan.in_collision_full(waypoint_traj)
-
-                    if (d_self > 0).any():
-                        print("self coll waypoint fail...")
-                        continue
-
-                    robot.plan.activate_arm("left", locked_arm_q=robot.q_right_home)
-                    l_approach_traj, l_approach_succ = robot.plan.gen_motion_from_goal_joints(
-                        goal_js=l_waypoint_traj[0, 0, :].unsqueeze(0),  # [num_traj, 8]
-                        q_init=robot.q_left_home.view(-1, 8),
-                    )
-                    robot.plan.activate_arm("right", locked_arm_q=robot.q_left_home)
-                    r_approach_traj, r_approach_succ = robot.plan.gen_motion_from_goal_joints(
-                        goal_js=r_waypoint_traj[0, 0, :].unsqueeze(0),  # [num_traj, 8]
-                        q_init=robot.q_right_home.view(-1, 8),
-                    )
-
-                    if (l_approach_succ is None or r_approach_succ is None):
-                        print("Approach fail...")
-                        continue
-                    if not (l_approach_succ & r_approach_succ).any():
-                        print("Approach fail...")
-                        continue
-
-                    approach_traj = robot.concat_joints(r_approach_traj.squeeze(), l_approach_traj.squeeze())
-                    d_world, d_self = robot.plan.in_collision_full(approach_traj)
-
-                    if (d_self > 0).any():
-                        continue
-                    if (d_world > 0).any():
-                        continue
-
-                    if (
-                        l_approach_succ is not None and l_approach_traj is not None and 
-                        r_approach_succ is not None and r_approach_traj is not None and
-                        l_approach_succ.all() and r_approach_succ.all()
-                    ):
-                        # ... it has succeeded.
-                        traj = torch.cat([approach_traj, waypoint_traj], dim=0)
-                        print("Found working traj")
-                        # yield traj
-                        found_traj = True
-
+                if (
+                    l_approach_succ is not None and l_approach_traj is not None and 
+                    r_approach_succ is not None and r_approach_traj is not None and
+                    l_approach_succ.all() and r_approach_succ.all()
+                ):
+                    # ... it has succeeded.
+                    traj = torch.cat([approach_traj, waypoint_traj], dim=0)
+                    print("Found working traj")
+                    # yield traj
+                    found_traj = True
+        
     l_waypoint_cache, r_waypoint_cache = {}, {}
     if (l_anchor_ik is not None and r_moving_ik is not None and l_anchor_ik_succ is not None and r_moving_ik_succ is not None):
         print(l_anchor_ik[l_anchor_ik_succ].shape, r_moving_ik[r_moving_ik_succ].shape)
@@ -686,7 +707,7 @@ def start_trial(
     print("done.")
     toad_opt.optimizer.load_trajectory(EXPERIMENTS[exp_name][1])
     frame_list = create_objects_in_scene(
-        server, toad_opt, object_frame_name="camera/object", create_gui=False
+        server, toad_opt, object_frame_name="camera/object", create_gui=False, create_grasps=False
     )
 
     # Add pointcloud to the scene, to check mesh alignment.
@@ -741,7 +762,7 @@ def start_trial(
             for curr_part_idx, curr_anchor_idx in hand_cands:
                 print("Trying part idx:", curr_part_idx, "anchor idx:", curr_anchor_idx)
                 traj = generate_path_bimanual(
-                    toad_opt, cam_vtf, robot, curr_part_idx, curr_anchor_idx,
+                    toad_opt, cam_vtf, robot, curr_part_idx, curr_anchor_idx, server
                 )
                 if traj is not None:
                     part_idx, anchor_idx = curr_part_idx, curr_anchor_idx
@@ -875,7 +896,7 @@ def initialize_zed(server: viser.ViserServer, camera_frame_name: str = "camera")
     return zed, camera_frame
 
 
-def main(exp_name: Literal["nerfgun", "eyeglasses", "scissors", "bear", "red_box", "painter"]):
+def main(exp_name: Literal["nerfgun", "eyeglasses", "scissors", "bear", "red_box", "painter", "wooden_drawer"]):
     server = viser.ViserServer()
 
     # Instantiate the stuff that needs to be re-used across sessions:
@@ -893,7 +914,8 @@ def main(exp_name: Literal["nerfgun", "eyeglasses", "scissors", "bear", "red_box
     @reset_robot_button.on_click
     def _(_):
         robot.reset_real()
-        if robot.real is not None:
+        if robot.real is None:
+            print("Robot not connected... robot.real is None.")
             return
         assert robot.real is not None
         robot.real.move_joints_sync(
