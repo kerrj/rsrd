@@ -47,7 +47,7 @@ class RigidGroupOptimizerConfig:
     pose_lr: float = 0.005
     pose_lr_final: float = 0.001
     mask_hands: bool = False
-    do_obj_optim: bool = True
+    do_obj_optim: bool = False
     blur_kernel_size: int = 5
 
 class RigidGroupOptimizer:
@@ -334,8 +334,7 @@ class RigidGroupOptimizer:
             loss = loss + atap_loss
         if do_obj_optim:
             # add regularizer on the parts to not move much
-            loss = loss + 0.01 * part_deltas[:,:3].norm(dim=-1).mean() + .01 * part_deltas[:,3:6].norm(dim=-1).mean()
-            loss = loss + 0.001 * obj_delta[:,:3].norm(dim=-1).mean() + .001 * obj_delta[:,3:6].norm(dim=-1).mean()
+            loss = loss + 0.01 * part_deltas[:,:3].norm(dim=-1).mean()# + .01 * part_deltas[:,3:6].norm(dim=-1).mean()
         return loss
     
     def get_smoothness_loss(self, deltas: torch.Tensor, position_lambda: float, rotation_lambda: float, active_timesteps = slice(None)):
@@ -370,7 +369,7 @@ class RigidGroupOptimizer:
                     lr_final=self.config.pose_lr_final, max_steps=niter, warmup_steps = n_warmup, ramp='linear', lr_pre_warmup = 1e-5
                 )
             ).get_scheduler(self.obj_optimizer, lr_init)
-        for _ in range(niter):
+        for i in range(niter):
             # renormalize rotation representation
             with torch.no_grad():
                 self.part_deltas[..., 3:] = self.part_deltas[..., 3:] / self.part_deltas[..., 3:].norm(dim=-1, keepdim=True)
@@ -399,14 +398,15 @@ class RigidGroupOptimizer:
                 with tape:
                     part_smoothness= .2 * self.get_smoothness_loss(self.part_deltas, 1.0, 1.0, frame_ids_to_optimize)
                     obj_smoothness = .1 * self.get_smoothness_loss(self.obj_delta, 1.0, 1.0, frame_ids_to_optimize)
-                print("Traj smoothness penalty (pos, rot)", part_smoothness.item(), obj_smoothness.item())
+                print("Traj smoothness penalty (part, object)", part_smoothness.item(), obj_smoothness.item())
                 (part_smoothness + obj_smoothness).backward()
                 tape.backward()
             self.part_optimizer.step()
             part_scheduler.step()
             if self.config.do_obj_optim:
-                self.obj_optimizer.step()
-                obj_scheduler.step()
+                if i < niter:
+                    self.obj_optimizer.step()
+                    obj_scheduler.step()
         with torch.no_grad():
             with self.render_lock:
                 self.dig_model.eval()
@@ -473,11 +473,17 @@ class RigidGroupOptimizer:
         """
         Saves the trajectory to a file
         """
+        # we need to convert the keyframes to the old keyframes format, which is a TxNx4x4 tensor of part deltas
+        keyframes = torch.empty(len(self.hand_frames), len(self.group_masks), 4, 4, dtype=torch.float32, device='cuda')
+        for i in range(len(self.hand_frames)):
+            group_mats = torch_posevec_to_mat(self.part_deltas[i])
+            keyframes[i] = group_mats
         torch.save({
+            "keyframes": keyframes,
             "part_deltas": self.part_deltas,
             "obj_delta": self.obj_delta,
             "hand_frames": self.hand_frames,
-            "hand_lefts": self.hand_lefts
+            "hand_lefts": self.hand_lefts,
         }, path)
 
     def load_trajectory(self, path: Path):
@@ -595,9 +601,9 @@ class RigidGroupOptimizer:
         # add another timestep of pose to the part and object poses
         if extrapolate_velocity and self.obj_delta.shape[0] > 1:
             with torch.no_grad():
-                new_obj = extrapolate_poses(self.obj_delta[-2], self.obj_delta[-1],.5)
+                # new_obj = extrapolate_poses(self.obj_delta[-2], self.obj_delta[-1],.5)
                 new_parts = extrapolate_poses(self.part_deltas[-2], self.part_deltas[-1],.2)
-                self.obj_delta = torch.nn.Parameter(torch.cat([self.obj_delta, new_obj.unsqueeze(0)], dim=0))
+                self.obj_delta = torch.nn.Parameter(torch.cat([self.obj_delta, self.obj_delta[-1].unsqueeze(0)], dim=0))
                 self.part_deltas = torch.nn.Parameter(torch.cat([self.part_deltas, new_parts.unsqueeze(0)], dim=0))
         else:
             self.obj_delta = torch.nn.Parameter(torch.cat([self.obj_delta, self.obj_delta[-1].unsqueeze(0)], dim=0))

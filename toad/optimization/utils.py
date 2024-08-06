@@ -192,7 +192,7 @@ def torch_posevec_to_mat(posevecs):
     """
     assert posevecs.shape[-1] == 7, posevecs.shape
     assert len(posevecs.shape) == 2, posevecs.shape
-    out = torch.eye(4, device=posevecs.device).unsqueeze(0).expand(posevecs.shape[0], -1, -1)
+    out = torch.eye(4, device=posevecs.device).unsqueeze(0).expand(posevecs.shape[0], -1, -1).clone()
     out[:, :3, 3] = posevecs[:, :3]
     out[:, :3, :3] = normalized_quat_to_rotmat(posevecs[:, 3:])
     return out

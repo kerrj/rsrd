@@ -33,15 +33,15 @@ class Frame:
 
     @property
     def depth(self):
-        return self._depth.retrieve()
+        return self._depth.retrieve().cuda()
     
     @property
     def dino_feats(self):
-        return self._dino_feats.retrieve()
+        return self._dino_feats.retrieve().cuda()
 
     @property
     def hand_mask(self):
-        return self._hand_mask.retrieve()
+        return self._hand_mask.retrieve().cuda()
     
     def __init__(self, rgb: torch.Tensor, camera: Cameras, dino_fn: Callable, metric_depth_img: Optional[torch.Tensor]):
         self.camera = deepcopy(camera.to('cuda'))
@@ -62,7 +62,7 @@ class Frame:
                             (camera.height, camera.width),
                             antialias=True,
                         ).squeeze().unsqueeze(-1)
-            return depth
+            return depth.cpu().pin_memory()
         self._depth = Future(_get_depth)
         @torch.no_grad()
         def _get_dino():
@@ -74,7 +74,7 @@ class Frame:
                 (camera.height, camera.width),
                 antialias=True,
             ).permute(1, 2, 0)
-            return dino_feats
+            return dino_feats.cpu().pin_memory()
         self._dino_feats = Future(_get_dino)
         @torch.no_grad()
         def _get_hand_mask():
@@ -85,7 +85,7 @@ class Frame:
                 ).squeeze()
                 == 0.0
             )
-            return hand_mask
+            return hand_mask.cpu().pin_memory()
         self._hand_mask = Future(_get_hand_mask)
         
 

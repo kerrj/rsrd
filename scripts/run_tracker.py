@@ -33,7 +33,7 @@ from dataclasses import dataclass
 import datetime
 from viser import transforms as vtf
 
-def animate_traj(optimizer:RigidGroupOptimizer, output_path: Optional[Path] = None):
+def animate_traj(optimizer:RigidGroupOptimizer, output_path: Optional[Path] = None, loop_animation = True):
     from viser import ViserServer
     gs_viser = ViserServer()
     optimizer.reset_transforms()
@@ -81,7 +81,7 @@ def animate_traj(optimizer:RigidGroupOptimizer, output_path: Optional[Path] = No
     @animate_button.on_click
     def _(_):
         gs_viser.send_file_download("animation.viser",bs)
-    while True:
+    while loop_animation:
         for t in range(optimizer.part_deltas.shape[0]):
             for i in range(optimizer.part_deltas.shape[1]):
                 p = optimizer.obj_delta[t,0].detach().cpu().numpy()
@@ -95,8 +95,8 @@ def animate_traj(optimizer:RigidGroupOptimizer, output_path: Optional[Path] = No
             time.sleep(1/30)
         time.sleep(.5)
 
-def get_hands(handreg, frame, framedepth, optimizer, outputs) -> Tuple[Optional[List[trimesh.Trimesh]],Optional[List[trimesh.Trimesh]]]:
-    left_hand,right_hand = handreg.detect_hands(frame,optimizer.init_c2w.fx.item()*(max(frame.shape[0],frame.shape[1])/PosedObservation.rasterize_resolution))
+def get_hands(handreg, frame, framedepth, optimizer, outputs, camera: Cameras,viser_server) -> Tuple[Optional[List[trimesh.Trimesh]],Optional[List[trimesh.Trimesh]]]:
+    left_hand,right_hand = handreg.detect_hands(frame,camera.fx.item()*(max(frame.shape[0],frame.shape[1])/PosedObservation.rasterize_resolution))
     for i,hands in enumerate([left_hand,right_hand]):
         if hands is None:continue
         hands['trimeshes'] = []
@@ -107,19 +107,19 @@ def get_hands(handreg, frame, framedepth, optimizer, outputs) -> Tuple[Optional[
                     (outputs['rgb'].shape[0], outputs['rgb'].shape[1]),
                     antialias = True,
                 ).permute(1, 2, 0)
-        handreg.align_hands(hands,outputs['depth'].detach()/optimizer.dataset_scale, framedepth, outputs['accumulation'].detach()>.8,optimizer.init_c2w.fx.item())
+        handreg.align_hands(hands,outputs['depth'].detach()/optimizer.dataset_scale, framedepth, outputs['accumulation'].detach()>.8,camera.fx.item())
         # visualize result
         for j in range(hands['verts'].shape[0]):
             vertices = hands['verts'][j]
             faces = hands['faces']
             mesh = trimesh.Trimesh(vertices, faces)
             cam_pose = torch.eye(4)
-            cam_pose[:3,:] = optimizer.init_c2w.camera_to_worlds
+            cam_pose[:3,:] = camera.camera_to_worlds
             cam_pose[1:3,:] *= -1
             mesh.apply_transform(cam_pose.cpu().numpy())
 
             mesh.vertices = mesh.vertices*optimizer.dataset_scale
-            v.viser_server.add_mesh_trimesh(f"hand{i}_{j}",mesh,scale=10)
+            viser_server.add_mesh_trimesh(f"hand{i}_{j}",mesh,scale=10)
             hands['trimeshes'].append(mesh)
     return [] if left_hand is None else left_hand['trimeshes'],[] if right_hand is None else right_hand['trimeshes']
 
@@ -142,23 +142,23 @@ def get_vid_frame(cap,timestamp):
 class ExperimentConfig:
     load_keyframes: bool = False
     camera_input: Literal['iphone_vertical','iphone','gopro','mx_iphone'] = 'iphone'
-    video_file: Path = Path("motion_vids/buddha_empty_close.MOV")
-    time_bounds: Tuple[float,float] = (0,3.5)
+    video_file: Path = Path("motion_vids/buddha_empty_back.MOV")
+    time_bounds: Tuple[float,float] = (0,.2)
     fps: int = 30
     dig_config: Path = Path("outputs/buddha_empty/dig/2024-07-03_195352/config.yml")#vit-l with 64 dim
-    #Path("outputs/sunglasses3/dig/2024-07-03_225001/config.yml")#vit-l with 64 dim
-    #Path("outputs/sunglasses3/dig/2024-07-17_215116/config.yml")#no antialiasing
-    #Path("outputs/sunglasses3/dig/2024-07-03_225001/config.yml")#vit-l with 64 dim
-    #Path("outputs/articulated_objects/dig/2024-07-15_205720/config.yml")
+    # Path("outputs/sunglasses3/dig/2024-07-03_225001/config.yml")#vit-l with 64 dim
+    # Path("outputs/articulated_objects/dig/2024-07-15_205720/config.yml")
     # Path("outputs/nerfgun_poly_far/dig/2024-07-03_211551/config.yml")#vit-l with 64 dim
     # dig_config = Path("outputs/purple_flower/dig/2024-07-03_200636/config.yml")#vit-l with 64 dim
     # dig_config = Path("outputs/lens_cleaner/dig/2024-07-04_183148/config.yml")
     # dig_config = Path("outputs/left_shoe/dig/2024-07-08_211329/config.yml")
-    base_output_folder: Path = Path("renders/tyro_streamlined")
+    base_output_folder: Path = Path("renders/new_corl_exps")
     output_name: Optional[str] = None
     """Stores the output experiment name, otherwise set to current datetime plus data name"""
     detect_hands: bool = False
     optimizer_config: RigidGroupOptimizerConfig = RigidGroupOptimizerConfig()
+    terminate: bool = False
+    """If true, the program will terminate after the optimization is finished"""
     
     @property
     def output_folder(self):
@@ -166,6 +166,7 @@ class ExperimentConfig:
     
     def __post_init__(self):
         assert self.video_file.exists()
+        assert self.time_bounds[0] < self.time_bounds[1]
         if self.output_name is None:
             # search for the folder name before 'dig'
             id_end = str(self.dig_config).find("/dig/")
@@ -203,6 +204,7 @@ def main(exp: ExperimentConfig):
         cam_pose = torch.from_numpy(H).float()[None,:3,:]
     if exp.camera_input == 'iphone':
         init_cam = Cameras(camera_to_worlds=cam_pose,fx = 1137.0,fy = 1137.0,cx = 1280.0/2,cy = 720/2,width=1280,height=720)
+        init_cam.rescale_output_resolution(1920/1280)
     elif exp.camera_input == 'mx_iphone':
         init_cam = Cameras(camera_to_worlds=cam_pose,fx = 1085.,fy = 1085.,cx = 644.,cy = 361.,width=1280,height=720)
         # init_cam.rescale_output_resolution(1920/1280)
@@ -264,10 +266,7 @@ def main(exp: ExperimentConfig):
         #convert to uint8 
         target_vis_frame_pil.save(str(exp.output_folder / 'initialized_pose.jpg'))
 
-        if exp.detect_hands:
-            depth = get_depth((target_frame_rgb*255).to(torch.uint8))
-            lh,rh = get_hands(handreg, target_frame_rgb.cpu().numpy(),1/depth,optimizer,outputs)
-            optimizer.register_keyframe(lhands = lh, rhands = rh)
+        optimizer.register_keyframe(lhands=[],rhands=[])#add a null keyframe to make sure the number of keyframes is aligned with the pose deltas
         for t in tqdm.tqdm(np.linspace(exp.time_bounds[0],exp.time_bounds[1],int((exp.time_bounds[1]-exp.time_bounds[0])*exp.fps))):
             frame = get_vid_frame(motion_clip,t)
             target_frame_rgb = ToTensor()(Image.fromarray(frame)).permute(1,2,0).cuda()
@@ -275,11 +274,11 @@ def main(exp: ExperimentConfig):
             optimizer.add_observation(optim_frame)
             outputs = optimizer.step(50)
             if exp.detect_hands:
-                lhands,rhands = get_hands(handreg, frame,1/get_depth((target_frame_rgb*255).to(torch.uint8))[...,None],optimizer,outputs)
+                lhands,rhands = get_hands(handreg, frame,1/get_depth((target_frame_rgb*255).to(torch.uint8))[...,None],
+                                          optimizer,outputs,optim_frame.frame.camera,v.viser_server)
             else:
                 lhands,rhands = [],[]
             optimizer.register_keyframe(lhands = lhands, rhands = rhands)
-            v._trigger_rerender()
             target_vis_frame = composite_vis_frame(target_frame_rgb,outputs)
             vis_frame = torch.concatenate([outputs["rgb"].detach(),target_vis_frame],dim=1).detach().cpu().numpy()
             fig = plotly_render(target_vis_frame.detach().cpu().numpy())
@@ -289,9 +288,12 @@ def main(exp: ExperimentConfig):
         out_clip = mpy.ImageSequenceClip(rgb_renders, fps=exp.fps)
 
         #save rendering video
-        fname = str(exp.output_folder / "optimizer_out.mp4")
+        fname = str(exp.output_folder / "raw_perframe_tracking.mp4")
         out_clip.write_videofile(fname, fps=exp.fps,codec='libx264')
         out_clip.write_videofile(fname.replace('.mp4','_mac.mp4'),fps=exp.fps,codec='mpeg4',bitrate='5000k')
+
+        print("Running smoothing...")
+        optimizer.step(all_frames=True,niter=50)
 
         #save part trajectories
         optimizer.save_trajectory(exp.output_folder / "keyframes.pt")
@@ -344,7 +346,7 @@ def main(exp: ExperimentConfig):
             hands = optimizer.hand_frames[i]
             for ih,h in enumerate(hands):
                 h_world = h.copy()
-                h_world.apply_transform(optimizer.get_registered_o2w().cpu().numpy())
+                h_world.apply_transform(optimizer.get_registered_o2w().detach().cpu().numpy())
                 v.viser_server.add_mesh_trimesh(f"hand{ih}",h_world,scale=10)
             v._trigger_rerender()
             time.sleep(1/exp.fps)
@@ -364,10 +366,10 @@ def main(exp: ExperimentConfig):
             optimizer.save_trajectory(exp.output_folder / "keyframes.pt")
         else:
             print("Please load all frames first!")
-    animate_traj(optimizer,exp.output_folder)
+    animate_traj(optimizer,exp.output_folder, loop_animation=not exp.terminate)
 
     print("Finished tracking!")
-    while True:
+    while not exp.terminate:
         time.sleep(.1)
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ class ATAPConfig:
     use_atap: bool = True
     touch_radius: float = .0015
     N: int = 500
-    loss_mult: float = .1
+    loss_mult: float = .2
     loss_alpha: float = 1.0#rule: for jointed, use 1.0 alpha, for non-jointed use 0.1 ish
 
 class ATAPLoss:
