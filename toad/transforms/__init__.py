@@ -1,4 +1,4 @@
-"""Rigid transforms implemented in PyTorch."""
+"""Rigid transforms implemented in PyTorch, ported from jaxlie."""
 
 from . import utils as utils
 from ._base import MatrixLieGroup as MatrixLieGroup

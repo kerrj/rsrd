@@ -8,7 +8,7 @@ from nerfstudio.configs.base_config import ViewerConfig
 import cv2
 from torchvision.transforms import ToTensor
 from PIL import Image
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Callable
 from nerfstudio.utils import writer
 import time
 from threading import Lock
@@ -24,130 +24,49 @@ from nerfstudio.engine.schedulers import (
     ExponentialDecaySchedulerConfig,
 )
 import warp as wp
-from toad.optimization.atap_loss import ATAPLoss
+from toad.optimization.atap_loss import ATAPLoss,ATAPConfig
 from toad.utils import *
-import viser.transforms as vtf
+import toad.transforms as vtf
 import trimesh
 from typing import Tuple
+from nerfstudio.model_components.losses import depth_ranking_loss
+from toad.optimization.utils import *
+from toad.optimization.observation import PosedObservation, VideoSequence, Frame
+from tqdm import tqdm
+from dataclasses import dataclass
 
-def quatmul(q0: torch.Tensor, q1: torch.Tensor):
-    w0, x0, y0, z0 = torch.unbind(q0, dim=-1)
-    w1, x1, y1, z1 = torch.unbind(q1, dim=-1)
-    return torch.stack(
-        [
-            -x0 * x1 - y0 * y1 - z0 * z1 + w0 * w1,
-            x0 * w1 + y0 * z1 - z0 * y1 + w0 * x1,
-            -x0 * z1 + y0 * w1 + z0 * x1 + w0 * y1,
-            x0 * y1 - y0 * x1 + z0 * w1 + w0 * z1,
-        ],
-        dim=-1,
-    )
-
-
-def depth_ranking_loss(rendered_depth, gt_depth):
-    """
-    Depth ranking loss as described in the SparseNeRF paper
-    Assumes that the layout of the batch comes from a PairPixelSampler, so that adjacent samples in the gt_depth
-    and rendered_depth are from pixels with a radius of each other
-    """
-    m = 1e-4
-    if rendered_depth.shape[0] % 2 != 0:
-        # chop off one index
-        rendered_depth = rendered_depth[:-1, :]
-        gt_depth = gt_depth[:-1, :]
-    dpt_diff = gt_depth[::2, :] - gt_depth[1::2, :]
-    out_diff = rendered_depth[::2, :] - rendered_depth[1::2, :] + m
-    differing_signs = torch.sign(dpt_diff) != torch.sign(out_diff)
-    loss = out_diff[differing_signs] * torch.sign(out_diff[differing_signs])
-    return loss.mean()
-
-
-@wp.kernel
-def apply_to_model(
-    pose_deltas: wp.array(dtype=float, ndim=2),
-    means: wp.array(dtype=wp.vec3),
-    quats: wp.array(dtype=float, ndim=2),
-    group_labels: wp.array(dtype=int),
-    centroids: wp.array(dtype=wp.vec3),
-    means_out: wp.array(dtype=wp.vec3),
-    quats_out: wp.array(dtype=float, ndim=2),
-):
-    """
-    Takes the current pose_deltas and applies them to each of the group masks
-    """
-    tid = wp.tid()
-    group_id = group_labels[tid]
-    position = wp.vector(
-        pose_deltas[group_id, 0], pose_deltas[group_id, 1], pose_deltas[group_id, 2]
-    )
-    # pose_deltas are in w x y z, we need to flip
-    quaternion = wp.quaternion(
-        pose_deltas[group_id, 4],
-        pose_deltas[group_id, 5],
-        pose_deltas[group_id, 6],
-        pose_deltas[group_id, 3],
-    )
-    transform = wp.transformation(position, quaternion)
-    means_out[tid] = (
-        wp.transform_point(transform, means[tid] - centroids[tid]) + centroids[tid]
-    )
-    gauss_quaternion = wp.quaternion(
-        quats[tid, 1], quats[tid, 2], quats[tid, 3], quats[tid, 0]
-    )
-    newquat = quaternion * gauss_quaternion
-    quats_out[tid, 0] = newquat[3]
-    quats_out[tid, 1] = newquat[0]
-    quats_out[tid, 2] = newquat[1]
-    quats_out[tid, 3] = newquat[2]
-
-
-def mnn_matcher(feat_a, feat_b):
-    """
-    feat_a: NxD
-    feat_b: MxD
-    return: K, K (indices in feat_a and feat_b)
-    """
-    device = feat_a.device
-    sim = feat_a.mm(feat_b.t())
-    nn12 = torch.max(sim, dim=1)[1]
-    nn21 = torch.max(sim, dim=0)[1]
-    ids1 = torch.arange(0, sim.shape[0], device=device)
-    mask = ids1 == nn21[nn12]
-    return ids1[mask], nn12[mask]
-
+@dataclass
+class RigidGroupOptimizerConfig:
+    use_depth: bool = True
+    rank_loss_mult: float = 0.2
+    rank_loss_erode: int = 3
+    depth_ignore_threshold: float = 0.1  # in meters
+    atap_config: ATAPConfig = ATAPConfig()
+    use_roi: bool = True
+    roi_inflate: float = 0.25
+    pose_lr: float = 0.005
+    pose_lr_final: float = 0.001
+    mask_hands: bool = False
+    do_obj_optim: bool = False
+    blur_kernel_size: int = 5
 
 class RigidGroupOptimizer:
-    use_depth: bool = True
-    rank_loss_mult: float = 0.1
-    rank_loss_erode: int = 5
-    depth_ignore_threshold: float = 0.1  # in meters
-    use_atap: bool = True
-    pose_lr: float = 0.005
-    pose_lr_final: float = 0.0005
-    mask_hands: bool = True
-    use_roi: bool = False
-    use_optical_flow: bool = False
-
-    init_p2o: torch.Tensor
-    """From: part, To: object. in current world frame. Part frame is centered at part centroid, and object frame is centered at object centroid."""
-
     def __init__(
         self,
+        config: RigidGroupOptimizerConfig,
         dig_model: DiGModel,
         dino_loader: DinoDataloader,
-        init_c2o: Cameras,
         group_masks: List[torch.Tensor],
         group_labels: torch.Tensor,
         dataset_scale: float,
-        render_lock=nullcontext(),
+        render_lock = nullcontext(),
     ):
         """
         This one takes in a list of gaussian ID masks to optimize local poses for
         Each rigid group can be optimized independently, with no skeletal constraints
         """
-        assert self.use_roi is False, "ROI seems to be cursed, dont use"
+        self.config = config
         self.dataset_scale = dataset_scale
-        self.tape = None
         self.is_initialized = False
         self.hand_lefts = []#list of bools for each hand frame
         self.dig_model = dig_model
@@ -162,143 +81,83 @@ class RigidGroupOptimizer:
         self.group_labels = group_labels
         self.group_masks = group_masks
         # store a 7-vec of trans, rotation for each group
-        self.pose_deltas = torch.zeros(
-            len(group_masks), 7, dtype=torch.float32, device="cuda"
+        self.part_deltas = torch.zeros(
+            1, len(group_masks), 7, dtype=torch.float32, device="cuda"
         )
-        self.pose_deltas[:, 3:] = torch.tensor(
+        self.part_deltas[0, :, 3:] = torch.tensor(
             [1, 0, 0, 0], dtype=torch.float32, device="cuda"
         )
-        self.pose_deltas = torch.nn.Parameter(self.pose_deltas)
-        k = 13
+        self.part_deltas = torch.nn.Parameter(self.part_deltas)
+        k = self.config.blur_kernel_size
         s = 0.3 * ((k - 1) * 0.5 - 1) + 0.8
         self.blur = kornia.filters.GaussianBlur2d((k, k), (s, s))
-        # NOT USED RN
-        self.connectivity_weights = torch.nn.Parameter(
-            -torch.ones(
-                len(group_masks), len(group_masks), dtype=torch.float32, device="cuda"
-            )
-        )
-        self.optimizer = torch.optim.Adam([self.pose_deltas], lr=self.pose_lr)
-        # self.weights_optimizer = torch.optim.Adam([self.connectivity_weights],lr=.001)
-        self.keyframes = []
+        self.part_optimizer = torch.optim.Adam([self.part_deltas], lr=self.config.pose_lr)
         #hand_frames stores a list of hand vertices and faces for each keyframe, stored in the OBJECT COORDINATE FRAME
         self.hand_frames = []
         # lock to prevent blocking the render thread if provided
         self.render_lock = render_lock
-        if self.use_atap:
-            self.atap = ATAPLoss(dig_model, group_masks, group_labels, self.dataset_scale)
-        self.init_c2o = deepcopy(init_c2o).to("cuda")._apply_fn_to_fields(torch.detach)
-        self._init_centroids()
-        # Save the initial object to world transform, and initial part to object transforms
-        self.init_o2w = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-            vtf.SO3.identity(), self.init_means.mean(dim=0).cpu().numpy().squeeze()
-        ).as_matrix()).float().cuda()
-        self.init_p2o = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
-        for i,g in enumerate(self.group_masks):
-            gp_centroid = self.init_means[g].mean(dim=0)
-            self.init_p2o[i,:,:] = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-                vtf.SO3.identity(), (gp_centroid - self.init_means.mean(dim=0)).cpu().numpy()
-            ).as_matrix()).float().cuda()
-
-    def _init_centroids(self):
+        self.atap = ATAPLoss(self.config.atap_config, dig_model, group_masks, group_labels, self.dataset_scale)
         self.init_means = self.dig_model.gauss_params["means"].detach().clone()
         self.init_quats = self.dig_model.gauss_params["quats"].detach().clone()
-        self.centroids = torch.empty(
-            (self.dig_model.num_points, 3),
-            dtype=torch.float32,
-            device="cuda",
-            requires_grad=False,
-        )
-        for i, mask in enumerate(self.group_masks):
-            with torch.no_grad():
-                self.centroids[mask] = self.init_means[mask].mean(
-                    dim=0
-                )
+        # Save the initial object to world transform, and initial part to object transforms
+        self.init_o2w = vtf.SE3.from_rotation_and_translation(
+            vtf.SO3.identity(dtype=torch.float32,device='cuda'), self.init_means.mean(dim=0).squeeze()
+        ).as_matrix()
+        self.init_o2w_7vec = torch.tensor([[0,0,0,1,0,0,0]],dtype=torch.float32,device='cuda')
+        self.init_o2w_7vec[0,:3] = self.init_means.mean(dim=0).squeeze()
+        self.init_p2o = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
+        self.init_p2o_7vec = torch.zeros(len(self.group_masks), 7, dtype=torch.float32, device="cuda")
+        self.init_p2o_7vec[:,3] = 1.0
+        for i,g in enumerate(self.group_masks):
+            gp_centroid = self.init_means[g].mean(dim=0)
+            self.init_p2o_7vec[i,:3] = gp_centroid - self.init_means.mean(dim=0)
+            self.init_p2o[i,:,:] = vtf.SE3.from_rotation_and_translation(
+                vtf.SO3.identity(dtype=torch.float32,device='cuda'), (gp_centroid - self.init_means.mean(dim=0))
+            ).as_matrix()
+        self.sequence = VideoSequence()
 
-    def initialize_obj_pose(self, niter=200, n_seeds=6, render=False, metric_depth = True):
+    def initialize_obj_pose(self, first_obs: PosedObservation, niter=200, n_seeds=6, render=False):
+        self.sequence.add_frame(first_obs)
         renders = []
         assert not self.is_initialized, "Can only initialize once"
 
-        def try_opt(start_pose_adj,niter, depth = False):
+        def try_opt(start_pose_adj, niter, use_depth, roi=False,lr=.01):
             "tries to optimize the pose, returns None if failed, otherwise returns outputs and loss"
-            self.reset_transforms()
-            whole_obj_gp_labels = torch.zeros(self.dig_model.num_points).int().cuda()
-            whole_obj_centroids = self.dig_model.means.mean(dim=0, keepdim=True).repeat(
-                self.dig_model.num_points, 1
-            )
             whole_pose_adj = start_pose_adj.detach().clone()
             whole_pose_adj = torch.nn.Parameter(whole_pose_adj)
-            optimizer = torch.optim.Adam([whole_pose_adj], lr=0.005)
-            for i in range(niter):
+            optimizer = torch.optim.Adam([whole_pose_adj], lr=lr)
+            scheduler = ExponentialDecayScheduler(
+                        ExponentialDecaySchedulerConfig(
+                            lr_final=.005, max_steps=niter,
+                        )
+            ).get_scheduler(optimizer, lr)
+            if roi: 
+                self.apply_to_model(whole_pose_adj, identity_7vec().repeat(len(self.group_masks), 1),self.group_labels)
+                xmin, xmax, ymin, ymax = self.calculate_roi(self.sequence.get_last_frame().frame.camera)
+                self.sequence.get_last_frame().set_roi(xmin, xmax, ymin, ymax)
+            for _ in tqdm(range(niter),"Optimizing pose..."):
                 with torch.no_grad():
-                    whole_pose_adj[:, 3:] = whole_pose_adj[:, 3:] / whole_pose_adj[
-                        :, 3:
-                    ].norm(dim=1, keepdim=True)
+                    whole_pose_adj[:, 3:] = whole_pose_adj[:, 3:] / whole_pose_adj[:, 3:].norm(dim=-1, keepdim=True)
                 tape = wp.Tape()
                 optimizer.zero_grad()
-                with self.render_lock:
-                    self.dig_model.eval()
-                    with tape:
-                        self.apply_to_model(
-                            whole_pose_adj, whole_obj_centroids, whole_obj_gp_labels
-                        )
-                    dig_outputs = self.dig_model.get_outputs(self.init_c2o)
-                    if "dino" not in dig_outputs:
-                        return None, None,None
-                dino_feats = (
-                    self.blur(dig_outputs["dino"].permute(2, 0, 1)[None])
-                    .squeeze()
-                    .permute(1, 2, 0)
-                )
-                pix_loss = self.frame_pca_feats - dino_feats
-                loss = pix_loss.norm(dim=-1).mean()
-                if depth and self.use_depth:
-                    object_mask = dig_outputs["accumulation"] > 0.9
-                    if metric_depth:
-                        physical_depth = dig_outputs["depth"] / self.dataset_scale
-                        valids = object_mask & (~self.frame_depth.isnan())
-                        if self.mask_hands:
-                            valids = valids & self.hand_mask.unsqueeze(-1)
-                        pix_loss = (physical_depth - self.frame_depth) ** 2
-                        pix_loss = pix_loss[
-                            valids & (pix_loss < self.depth_ignore_threshold**2)
-                        ]
-                        loss = loss + pix_loss.mean()
-                    else:
-                        # This is ranking loss for monodepth (which is disparity)
-                        frame_depth = 1 / self.frame_depth # convert disparity to depth
-                        N = 30000
-                        # erode the mask by like 10 pixels
-                        object_mask = object_mask & (~self.frame_depth.isnan())
-                        object_mask = object_mask & (dig_outputs['depth'] > .05)
-                        object_mask = kornia.morphology.erosion(
-                            object_mask.squeeze().unsqueeze(0).unsqueeze(0).float(), torch.ones((self.rank_loss_erode, self.rank_loss_erode), device='cuda')
-                        ).squeeze().bool()
-                        if self.mask_hands:
-                            object_mask = object_mask & self.hand_mask
-                        valid_ids = torch.where(object_mask)
-                        rand_samples = torch.randint(
-                            0, valid_ids[0].shape[0], (N,), device="cuda"
-                        )
-                        rand_samples = (
-                            valid_ids[0][rand_samples],
-                            valid_ids[1][rand_samples],
-                        )
-                        rend_samples = dig_outputs["depth"][rand_samples]
-                        mono_samples = frame_depth[rand_samples]
-                        rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                        loss = loss + self.rank_loss_mult*rank_loss
+                with tape:
+                    frame = self.sequence.get_last_frame().frame if not roi else self.sequence.get_last_frame().roi_frame
+                    loss = self.get_optim_loss(frame, whole_pose_adj, identity_7vec().repeat(len(self.group_masks), 1), use_depth, False, False, False, False)
+                if loss is None:
+                    return torch.inf, None
                 loss.backward()
                 tape.backward()
                 optimizer.step()
+                scheduler.step()
                 if render:
+                    with torch.no_grad():
+                        dig_outputs = self.dig_model.get_outputs(self.sequence.get_last_frame().frame.camera)
                     renders.append(dig_outputs["rgb"].detach())
-            self.is_initialized = True
-            return dig_outputs, loss, whole_pose_adj.data.detach().clone()
+            return loss, whole_pose_adj.data.detach()
 
         best_loss = float("inf")
 
-        def find_pixel(n_gauss=10000):
+        def find_pixel(n_gauss=20000):
             """
             returns the y,x coord and box size of the object in the video frame, based on the dino features
             and mutual nearest neighbors
@@ -307,58 +166,56 @@ class RigidGroupOptimizer:
                 0, self.dig_model.num_points, (n_gauss,), device="cuda"
             )
             nn_inputs = self.dig_model.gauss_params["dino_feats"][samps]
-            # dino_feats = self.dig_model.nn(nn_inputs.half()).float()  # NxC
             dino_feats = self.dig_model.nn(nn_inputs)  # NxC
-            downsamp_factor = 4
-            downsamp_frame_feats = self.frame_pca_feats[
-                ::downsamp_factor, ::downsamp_factor, :
-            ]
+            downsamp_frame_feats = self.sequence.get_last_frame().frame.dino_feats
             frame_feats = downsamp_frame_feats.reshape(
                 -1, downsamp_frame_feats.shape[-1]
             )  # (H*W) x C
+            downsamp = 4
+            frame_feats = frame_feats[::downsamp]
             _, match_ids = mnn_matcher(dino_feats, frame_feats)
-            x, y = (match_ids % (self.init_c2o.width / downsamp_factor)).float(), (
-                match_ids // (self.init_c2o.width / downsamp_factor)
+            x, y = (match_ids*downsamp % (self.sequence.get_last_frame().frame.camera.width)).float(), (
+                match_ids*downsamp // (self.sequence.get_last_frame().frame.camera.width)
             ).float()
-            x, y = x * downsamp_factor, y * downsamp_factor
-            return y, x, torch.tensor([y.mean().item(), x.mean().item()], device="cuda")
+            x, y = x, y
+            return y, x, torch.tensor([y.median().item(), x.median().item()], device="cuda")
 
         ys, xs, best_pix = find_pixel()
         obj_centroid = self.dig_model.means.mean(dim=0, keepdim=True)  # 1x3
-        ray = self.init_c2o.generate_rays(0, best_pix)
-        dist = 1.0
+        ray = self.sequence.get_last_frame().frame.camera.generate_rays(0, best_pix)
+        dist = 2
         point = ray.origins + ray.directions * dist
-        for z_rot in np.linspace(0, np.pi * 2, n_seeds):
+        for z_rot in tqdm(np.linspace(0, np.pi * 2, n_seeds),"Trying seeds..."):
             whole_pose_adj = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
             # x y z qw qx qy qz
             # (x,y,z) = something along ray - centroid
-            quat = torch.from_numpy(vtf.SO3.from_z_radians(z_rot).wxyz).cuda()
+            quat = vtf.SO3.from_z_radians(torch.tensor(z_rot)).wxyz.float().cuda()
             whole_pose_adj[:, :3] = point - obj_centroid
             whole_pose_adj[:, 3:] = quat
-            dig_outputs, loss, final_pose = try_opt(whole_pose_adj,niter)
+            loss, final_pose = try_opt(whole_pose_adj, niter, False)
             if loss is not None and loss < best_loss:
                 best_loss = loss
-                best_outputs = dig_outputs
                 best_pose = final_pose
-        _,_,best_pose = try_opt(best_pose,200,depth=True)
-        self.reset_transforms()
+
+        _, best_pose = try_opt(best_pose, 200, False, roi=True, lr=.005)# do a few optimization steps with depth
         with self.render_lock:
             self.apply_to_model(
                 best_pose,
-                self.dig_model.means.mean(dim=0, keepdim=True).repeat(
-                    self.dig_model.num_points, 1
-                ),
-                torch.zeros(self.dig_model.num_points).int().cuda(),
+                identity_7vec().repeat(len(self.group_masks), 1),
+                self.group_labels,
             )
-            self.objreg2objinit = torch.from_numpy(vtf.SE3.from_rotation_and_translation(
-                vtf.SO3(best_pose[0,3:].cpu().numpy()), best_pose[0,:3].cpu().numpy().squeeze()
-                ).as_matrix()).float().cuda()
-            self._init_centroids()#overwrites the init positions to force the object at the center
-            with torch.no_grad():
-                self.pose_deltas[:, 3:] = torch.tensor([1, 0, 0, 0], dtype=torch.float32, device="cuda")
-                self.pose_deltas[:, :3] = 0
+        best_outputs = self.dig_model.get_outputs(self.sequence.get_last_frame().frame.camera)
+        self.obj_delta = best_pose[None].contiguous()
+        if self.config.do_obj_optim:
+            self.obj_delta.requires_grad_(True)
+            self.obj_optimizer = torch.optim.Adam([self.obj_delta], lr=self.config.pose_lr)
+        self.is_initialized = True
         return xs, ys, best_outputs, renders
-
+    
+    @property
+    def objreg2objinit(self):
+        return torch_posevec_to_mat(self.obj_delta[-1]).squeeze()
+    
     def get_poses_relative_to_camera(self, c2w: torch.Tensor, keyframe: Optional[int] = None):
         """
         Returns the current group2cam transform as defined by the specified camera pose in world coords
@@ -396,132 +253,68 @@ class RigidGroupOptimizer:
         """
         returns the transform from part_i to parti_i init at keyframe index given
         """
-        initial_part2world = self.get_initial_part2world(i)
-        part2world = self.get_part2world_transform(i)
-        return initial_part2world.inverse().matmul(part2world)
-    
-    def get_part2world_transform(self,i):
-        """
-        returns the transform from part_i to world at keyframe index given
-        """
-        p_delta = self.pose_deltas.detach().clone()
-        R_delta = torch.from_numpy(vtf.SO3(p_delta[i, 3:].cpu().numpy()).as_matrix()).float().cuda()
-        # we premultiply by rotation matrix to line up the 
-        initial_part2world = self.get_initial_part2world(i)
-        part2world = initial_part2world.clone()
-        part2world[:3,:3] = R_delta[:3,:3].matmul(part2world[:3,:3])# rotate around world frame
-        part2world[:3,3] += p_delta[i,:3]# translate in world frame
-        return part2world
+        return torch_posevec_to_mat(self.part_deltas[-1,i].unsqueeze(0)).squeeze()
     
     def get_keyframe_part2world_transform(self,i,keyframe):
         """
         returns the transform from part_i to world at keyframe index given
         """
-        part2part = self.keyframes[keyframe]
-        return self.get_initial_part2world(i).matmul(part2part[i])
+        part2part = torch_posevec_to_mat(self.part_deltas[keyframe,i].detach().unsqueeze(0))
+        return self.get_registered_o2w.matmul(self.init_p2o[i]).matmul(part2part[i])
     
     def get_registered_o2w(self):
         return self.init_o2w.matmul(self.objreg2objinit)
-
-    def get_initial_part2world(self,i):
-        return self.get_registered_o2w().matmul(self.init_p2o[i])
     
-    def step(self, niter=1, use_depth=True, use_rgb=False, metric_depth=False):
-        scheduler = ExponentialDecayScheduler(
-            ExponentialDecaySchedulerConfig(
-                lr_final=self.pose_lr_final, max_steps=niter
+    def get_optim_loss(self, frame: Frame, obj_delta, part_deltas, use_depth, use_rgb, use_atap, use_hand_mask, do_obj_optim):
+        """
+        Returns a backpropable loss for the given frame
+        """
+        with self.render_lock:
+            self.dig_model.eval()
+            self.apply_to_model(
+                obj_delta, part_deltas, self.group_labels
             )
-        ).get_scheduler(self.optimizer, self.pose_lr)
-        roi_cam = self.get_ROI_cam(self.get_ROI()) if self.use_roi else self.init_c2o
-        if self.use_optical_flow:
-            prev_frame_pose_deltas = self.pose_deltas.detach().clone()
-            N_flow = 10000
-            with torch.no_grad(),self.render_lock:
-                self.dig_model.eval()
-                self.apply_to_model(
-                    self.pose_deltas, self.centroids, self.group_labels
-                )
-                before_outputs = self.dig_model.get_outputs(roi_cam)
-            #first render a start frame, deproject points, get their in world space
-            valid_ids = torch.where(before_outputs['accumulation']>.8)
-            rand_samples = torch.randint(
-                0, valid_ids[0].shape[0], (N_flow,), device="cuda"
-            )
-            flow_sample_coords = (
-                valid_ids[0][rand_samples], # y
-                valid_ids[1][rand_samples], # x
-            )
-            sample_depth = before_outputs['depth'][flow_sample_coords]
-            sample_homog_rays = torch.cat([flow_sample_coords[1][...,None],flow_sample_coords[0][...,None],torch.ones_like(flow_sample_coords[0][...,None])],dim=1).float()
-            sample_rays = roi_cam.get_intrinsics_matrices()[0].inverse().cuda().matmul(sample_homog_rays.t()).t()
-            pts_cam = sample_rays * sample_depth
-            c2w = torch.cat([roi_cam.camera_to_worlds[0],torch.tensor([0,0,0,1],device='cuda').view(1,4)],dim=0)
-            pts_world = c2w.matmul(torch.cat([pts_cam,torch.ones_like(pts_cam[:,0:1])],dim=1).t()).t()[:,:3]
-            import pdb;pdb.set_trace()
-            # compute the nearest neighbor gaussian for each point
-            from cuml.neighbors import NearestNeighbors
-            model = NearestNeighbors(n_neighbors=1)
-            means = self.dig_model.means.detach().cpu().numpy()
-            model.fit(means)
-            _, match_ids = model.kneighbors(pts_world)
-            match_ids = torch.tensor(match_ids,dtype=torch.long,device='cuda')
-            point_clusters = self.group_labels[match_ids]
-        for i in range(niter):
-            # renormalize rotation representation
-            with torch.no_grad():
-                self.pose_deltas[:, 3:] = self.pose_deltas[:, 3:] / self.pose_deltas[
-                    :, 3:
-                ].norm(dim=1, keepdim=True)
-            tape = wp.Tape()
-            self.optimizer.zero_grad()
-            # self.weights_optimizer.zero_grad()
-            with self.render_lock:
-                self.dig_model.eval()
-                with tape:
-                    self.apply_to_model(
-                        self.pose_deltas, self.centroids, self.group_labels
-                    )
-                dig_outputs = self.dig_model.get_outputs(roi_cam)
-            if "dino" not in dig_outputs:
-                self.reset_transforms()
-                raise RuntimeError("Lost tracking")
-            with torch.no_grad():
-                object_mask = dig_outputs["accumulation"] > 0.9
-            dino_feats = (
-                self.blur(dig_outputs["dino"].permute(2, 0, 1)[None])
-                .squeeze()
-                .permute(1, 2, 0)
-            )
-            if self.mask_hands:
-                mse_loss = (self.frame_pca_feats - dino_feats)[self.hand_mask].norm(dim=-1)
+            dig_outputs = self.dig_model.get_outputs(frame.camera)
+        with torch.no_grad():
+            object_mask = dig_outputs["accumulation"] > 0.8
+        if not object_mask.any():
+            return None
+        blurred_dino_feats = (
+            self.blur(dig_outputs["dino"].permute(2, 0, 1)[None])
+            .squeeze()
+            .permute(1, 2, 0)
+        )
+        dino_feats = torch.where(object_mask, dig_outputs["dino"], blurred_dino_feats)
+        if use_hand_mask:
+            loss = (frame.dino_feats - dino_feats)[frame.hand_mask].norm(dim=-1).mean()
+        else:
+            loss = (frame.dino_feats - dino_feats).norm(dim=-1).mean()
+        # THIS IS BAD WE NEED TO FIX THIS (because resizing makes the image very slightly misaligned)
+        if use_depth:
+            if frame.metric_depth:
+                physical_depth = dig_outputs["depth"] / self.dataset_scale
+                valids = object_mask & (~frame.depth.isnan())
+                if use_hand_mask:
+                    valids = valids & frame.hand_mask.unsqueeze(-1)
+                pix_loss = (physical_depth - frame.depth) ** 2
+                pix_loss = pix_loss[
+                    valids & (pix_loss < self.config.depth_ignore_threshold**2)
+                ]
+                loss = loss + pix_loss.mean()
             else:
-                mse_loss = (self.frame_pca_feats - dino_feats).norm(dim=-1)
-            # THIS IS BAD WE NEED TO FIX THIS (because resizing makes the image very slightly misaligned)
-            loss = mse_loss.mean()
-            if use_depth and self.use_depth:
-                if metric_depth:
-                    physical_depth = dig_outputs["depth"] / self.dataset_scale
-                    valids = object_mask & (~self.frame_depth.isnan())
-                    if self.mask_hands:
-                        valids = valids & self.hand_mask.unsqueeze(-1)
-                    pix_loss = (physical_depth - self.frame_depth) ** 2
-                    pix_loss = pix_loss[
-                        valids & (pix_loss < self.depth_ignore_threshold**2)
-                    ]
-                    loss = loss + pix_loss.mean()
-                else:
-                    # This is ranking loss for monodepth (which is disparity)
-                    frame_depth = 1 / self.frame_depth # convert disparity to depth
-                    N = 30000
-                    # erode the mask by like 10 pixels
-                    object_mask = object_mask & (~self.frame_depth.isnan())
-                    object_mask = object_mask & (dig_outputs['depth'] > .05)
-                    object_mask = kornia.morphology.erosion(
-                        object_mask.squeeze().unsqueeze(0).unsqueeze(0).float(), torch.ones((self.rank_loss_erode, self.rank_loss_erode), device='cuda')
-                    ).squeeze().bool()
-                    if self.mask_hands:
-                        object_mask = object_mask & self.hand_mask
-                    valid_ids = torch.where(object_mask)
+                # This is ranking loss for monodepth (which is disparity)
+                frame_depth = 1 / frame.depth # convert disparity to depth
+                N = 20000
+                # erode the mask by like 10 pixels
+                object_mask = object_mask & (~frame_depth.isnan())
+                # commenting this out for now since it sometimes crashes with no valid pixels
+                object_mask = kornia.morphology.erosion(
+                    object_mask.squeeze().unsqueeze(0).unsqueeze(0).float(), torch.ones((self.config.rank_loss_erode, self.config.rank_loss_erode), device='cuda')
+                ).squeeze().bool()
+                if use_hand_mask:
+                    object_mask = object_mask & frame.hand_mask
+                valid_ids = torch.where(object_mask)
+                if len(valid_ids[0]) > 0:
                     rand_samples = torch.randint(
                         0, valid_ids[0].shape[0], (N,), device="cuda"
                     )
@@ -532,35 +325,100 @@ class RigidGroupOptimizer:
                     rend_samples = dig_outputs["depth"][rand_samples]
                     mono_samples = frame_depth[rand_samples]
                     rank_loss = depth_ranking_loss(rend_samples, mono_samples)
-                    loss = loss + self.rank_loss_mult*rank_loss
-            if use_rgb:
-                loss = loss + 0.05 * (dig_outputs["rgb"] - self.rgb_frame).abs().mean()
-            if self.use_atap:
-                weights = torch.ones_like(self.connectivity_weights)
+                    loss = loss + self.config.rank_loss_mult*rank_loss
+        if use_rgb:
+            loss = loss + 0.05 * (dig_outputs["rgb"] - frame.rgb).abs().mean()
+        if use_atap:
+            weights = torch.ones(len(self.group_masks), len(self.group_masks),dtype=torch.float32,device='cuda')
+            atap_loss = self.atap(weights)
+            loss = loss + atap_loss
+        if do_obj_optim:
+            # add regularizer on the parts to not move much
+            loss = loss + 0.01 * part_deltas[:,:3].norm(dim=-1).mean()# + .01 * part_deltas[:,3:6].norm(dim=-1).mean()
+        return loss
+    
+    def get_smoothness_loss(self, deltas: torch.Tensor, position_lambda: float, rotation_lambda: float, active_timesteps = slice(None)):
+        """
+        Returns the smoothness loss for the given deltas
+        """
+        loss = torch.empty(deltas.shape[0], deltas.shape[1], dtype=torch.float32, device="cuda", requires_grad=True)
+        wp.launch(
+            kernel=traj_smoothness_loss,
+            dim=(deltas.shape[0], deltas.shape[1]),
+            inputs=[wp.from_torch(deltas), position_lambda, rotation_lambda],
+            outputs = [wp.from_torch(loss)],
+        )
+        return loss[active_timesteps].sum()
+    
+    def step(self, niter=1, all_frames = False):
+        lr_init = self.config.pose_lr
+        n_warmup = 5 if all_frames else 0
+        if all_frames:
+            # reset the optimizers
+            self.part_optimizer = torch.optim.Adam([self.part_deltas], lr=self.config.pose_lr)
+            if self.config.do_obj_optim:
+                self.obj_optimizer = torch.optim.Adam([self.obj_delta], lr=self.config.pose_lr)
+        part_scheduler = ExponentialDecayScheduler(
+            ExponentialDecaySchedulerConfig(
+                lr_final=self.config.pose_lr_final, max_steps=niter, warmup_steps = n_warmup, ramp='linear', lr_pre_warmup = 1e-5
+            )
+        ).get_scheduler(self.part_optimizer, lr_init)
+        if self.config.do_obj_optim:
+            obj_scheduler = ExponentialDecayScheduler(
+                ExponentialDecaySchedulerConfig(
+                    lr_final=self.config.pose_lr_final, max_steps=niter, warmup_steps = n_warmup, ramp='linear', lr_pre_warmup = 1e-5
+                )
+            ).get_scheduler(self.obj_optimizer, lr_init)
+        for i in range(niter):
+            # renormalize rotation representation
+            with torch.no_grad():
+                self.part_deltas[..., 3:] = self.part_deltas[..., 3:] / self.part_deltas[..., 3:].norm(dim=-1, keepdim=True)
+                self.obj_delta[..., 3:] = self.obj_delta[..., 3:] / self.obj_delta[..., 3:].norm(dim=-1,keepdim=True)
+            self.part_optimizer.zero_grad()
+            if self.config.do_obj_optim:
+                self.obj_optimizer.zero_grad()
+            # Compute loss
+            frame_ids_to_optimize = list(range(len(self.sequence))) if all_frames else [-1]
+            for idx in frame_ids_to_optimize:
+                tape = wp.Tape()
                 with tape:
-                    atap_loss = self.atap(weights)
-                loss = loss + atap_loss
-            if self.use_optical_flow:
-                transforms_to_apply = torch.eye(4,device='cuda').unsqueeze(0).repeat(N_flow,1,1)
-            loss.backward()
-            tape.backward()
-            self.optimizer.step()
-            # self.weights_optimizer.step()
-            scheduler.step()
-        # reset lr
-        self.optimizer.param_groups[0]["lr"] = self.pose_lr
+                    this_obj_delta = self.obj_delta[idx]
+                    this_part_deltas = self.part_deltas[idx]
+                    observation = self.sequence.get_frame(idx)
+                    frame = observation.frame if not self.config.use_roi else observation.roi_frame
+                    loss = self.get_optim_loss(frame, this_obj_delta, this_part_deltas, 
+                        self.config.use_depth, False, self.config.atap_config.use_atap, self.config.mask_hands, self.config.do_obj_optim)
+                loss.backward()
+                #tape backward needs to be after loss backward since loss backward propagates gradients to the outputs of warp kernels
+                tape.backward()
+                # tape backward only propagates up to the slice, so we need to call autograd again to keep going beyond
+                torch.autograd.backward([this_obj_delta,this_part_deltas], grad_tensors=[this_obj_delta.grad,this_part_deltas.grad])
+            if all_frames:
+                tape = wp.Tape()
+                with tape:
+                    part_smoothness= .2 * self.get_smoothness_loss(self.part_deltas, 1.0, 1.0, frame_ids_to_optimize)
+                    obj_smoothness = .1 * self.get_smoothness_loss(self.obj_delta, 1.0, 1.0, frame_ids_to_optimize)
+                print("Traj smoothness penalty (part, object)", part_smoothness.item(), obj_smoothness.item())
+                (part_smoothness + obj_smoothness).backward()
+                tape.backward()
+            self.part_optimizer.step()
+            part_scheduler.step()
+            if self.config.do_obj_optim:
+                if i < niter:
+                    self.obj_optimizer.step()
+                    obj_scheduler.step()
         with torch.no_grad():
             with self.render_lock:
                 self.dig_model.eval()
                 self.apply_to_model(
-                        self.pose_deltas.detach(), self.centroids, self.group_labels
+                        self.obj_delta[-1], self.part_deltas[-1], self.group_labels
                     )
-                full_outputs = self.dig_model.get_outputs(self.init_c2o)
-        return {k:i.detach().clone() for k,i in full_outputs.items()}
+                full_outputs = self.dig_model.get_outputs(self.sequence.get_last_frame().frame.camera)
+        return {k:i.detach() for k,i in full_outputs.items()}
 
-    def apply_to_model(self, pose_deltas, centroids, group_labels):
+    def apply_to_model(self, objdelta, part_deltas, group_labels):
         """
-        Takes the current pose_deltas and applies them to each of the group masks
+        Takes the current part_deltas and applies them to each of the group masks
         """
         self.reset_transforms()
         new_quats = torch.empty_like(
@@ -569,15 +427,18 @@ class RigidGroupOptimizer:
         new_means = torch.empty_like(
             self.dig_model.gauss_params["means"], requires_grad=True
         )
+        assert objdelta.shape == (1,7), objdelta.shape
         wp.launch(
             kernel=apply_to_model,
             dim=self.dig_model.num_points,
-            inputs=[
-                wp.from_torch(pose_deltas),
+            inputs = [
+                wp.from_torch(self.init_o2w_7vec),
+                wp.from_torch(self.init_p2o_7vec),
+                wp.from_torch(objdelta),
+                wp.from_torch(part_deltas),
+                wp.from_torch(group_labels),
                 wp.from_torch(self.dig_model.gauss_params["means"], dtype=wp.vec3),
                 wp.from_torch(self.dig_model.gauss_params["quats"]),
-                wp.from_torch(group_labels),
-                wp.from_torch(centroids, dtype=wp.vec3),
             ],
             outputs=[wp.from_torch(new_means, dtype=wp.vec3), wp.from_torch(new_quats)],
         )
@@ -601,35 +462,28 @@ class RigidGroupOptimizer:
             self.hand_frames.append([])
             self.hand_lefts.append([])
 
-        partdeltas = torch.empty(len(self.group_masks), 4, 4, dtype=torch.float32, device="cuda")
-        for i in range(len(self.group_masks)):
-            partdeltas[i] = self.get_partdelta_transform(i)
-        self.keyframes.append(partdeltas)
     @torch.no_grad()
     def apply_keyframe(self, i):
         """
         Applies the ith keyframe to the pose_deltas
         """
-        # all this scary math is to convert the partdelta transforms to the pose_delta format for applying to 
-        # the model
-        deltas_to_apply = torch.empty(len(self.group_masks), 7, dtype=torch.float32, device="cuda")
-        for j in range(len(self.group_masks)):
-            part2world = self.get_keyframe_part2world_transform(j,i)
-            initpart2world = self.get_keyframe_part2world_transform(j,0)
-            rotdelta = part2world[:3,:3].matmul(initpart2world[:3,:3].inverse())
-            deltas_to_apply[j,:3] = part2world[:3,3] - initpart2world[:3,3]
-            deltas_to_apply[j,3:] = torch.from_numpy(vtf.SO3.from_matrix(rotdelta[:3,:3].cpu().numpy()).wxyz).cuda()
-        with torch.no_grad():
-            self.apply_to_model(deltas_to_apply, self.centroids, self.group_labels)
+        self.apply_to_model(self.obj_delta[i], self.part_deltas[i], self.group_labels)
     
     def save_trajectory(self, path: Path):
         """
         Saves the trajectory to a file
         """
+        # we need to convert the keyframes to the old keyframes format, which is a TxNx4x4 tensor of part deltas
+        keyframes = torch.empty(len(self.hand_frames), len(self.group_masks), 4, 4, dtype=torch.float32, device='cuda')
+        for i in range(len(self.hand_frames)):
+            group_mats = torch_posevec_to_mat(self.part_deltas[i])
+            keyframes[i] = group_mats
         torch.save({
-            "keyframes": self.keyframes,
+            "keyframes": keyframes,
+            "part_deltas": self.part_deltas,
+            "obj_delta": self.obj_delta,
             "hand_frames": self.hand_frames,
-            "hand_lefts": self.hand_lefts
+            "hand_lefts": self.hand_lefts,
         }, path)
 
     def load_trajectory(self, path: Path):
@@ -637,10 +491,11 @@ class RigidGroupOptimizer:
         Loads the trajectory from a file. Sets keyframes and hand_frames.
         """
         data = torch.load(path)
-        self.keyframes = [d.cuda() for d in data["keyframes"]]
+        self.part_deltas = data['part_deltas'].cuda()
+        self.obj_delta = data['obj_delta'].cuda()
         self.hand_frames = data['hand_frames']
         self.hand_lefts = data['hand_lefts']
-    
+        self.is_initialized = True
     
     def compute_single_hand_assignment(self) -> List[int]:
         """
@@ -671,7 +526,6 @@ class RigidGroupOptimizer:
         zipped = list(zip(ids,sum_part_dists))
         zipped.sort(key=lambda x: x[1])
         return [z[0] for z in zipped]
-
 
     def compute_two_hand_assignment(self) -> List[Tuple[int,int]]:
         """
@@ -717,99 +571,45 @@ class RigidGroupOptimizer:
         with torch.no_grad():
             self.dig_model.gauss_params["means"] = self.init_means.detach().clone()
             self.dig_model.gauss_params["quats"] = self.init_quats.detach().clone()
-    
-    def get_ROI(self, inflate = 0.3):
-        """
-        returns the bounding box of the object in the current frame
 
-        returns: ymin, ymax, xmin, xmax
+    def calculate_roi(self, cam: Cameras):
         """
-        assert self.use_roi
-        # assert inflate < 1
+        Calculate the ROI for the object given a certain camera pose
+        """
         with torch.no_grad():
-            with self.render_lock:
-                self.dig_model.eval()
-                self.apply_to_model(self.pose_deltas.detach(), self.centroids, self.group_labels)
-                object_mask = self.dig_model.get_outputs(self.init_c2o)["accumulation"] > 0.8
+            outputs = self.dig_model.get_outputs(cam)
+            object_mask = outputs["accumulation"] > 0.8
             valids = torch.where(object_mask)
-            inflate_amnt = (inflate*(valids[0].max() - valids[0].min()).item(),
-                            inflate*(valids[1].max() - valids[1].min()).item())
-            candidate_roi = (valids[0].min().item() - inflate_amnt[0], inflate_amnt[0] + valids[0].max().item(), 
-                    valids[1].min().item() - inflate_amnt[1], inflate_amnt[1] + valids[1].max().item())
-            #clip ROI to image bounds
-            candidate_roi = (int(candidate_roi[0]),int(candidate_roi[1]),int(candidate_roi[2]),int(candidate_roi[3]))
-            candidate_roi = (max(0,candidate_roi[0]),min(self.init_c2o.height-1,candidate_roi[1]),
-                            max(0,candidate_roi[2]),min(self.init_c2o.width-1,candidate_roi[3]))
-            candidate_roi = (int(candidate_roi[0]),int(candidate_roi[1]),int(candidate_roi[2]),int(candidate_roi[3]))
-        return candidate_roi
+            valid_xs = valids[1]/object_mask.shape[1]
+            valid_ys = valids[0]/object_mask.shape[0]#normalize to 0-1
+            inflate_amnt = (self.config.roi_inflate*(valid_xs.max() - valid_xs.min()).item(),
+                            self.config.roi_inflate*(valid_ys.max() - valid_ys.min()).item())# x, y
+            xmin, xmax, ymin, ymax = max(0,valid_xs.min().item() - inflate_amnt[0]), min(1,valid_xs.max().item() + inflate_amnt[0]),\
+                                max(0,valid_ys.min().item() - inflate_amnt[1]), min(1,valid_ys.max().item() + inflate_amnt[1])
+            return xmin, xmax, ymin, ymax
         
-    def get_ROI_cam(self, roi):
-        """
-        returns the intrinsics of the camera for the current ROI
-        """
-        assert self.use_roi
-        ymin, ymax, xmin, xmax = roi
-        height = torch.tensor(ymax - ymin,device='cuda').view(1,1).int()
-        width = torch.tensor(xmax - xmin,device='cuda').view(1,1).int()
-        cx = torch.tensor(self.init_c2o.cx.detach().clone() - xmin,device='cuda').view(1,1)
-        cy = torch.tensor(self.init_c2o.cy.detach().clone() - ymin,device='cuda').view(1,1)
-        newcam = Cameras(self.init_c2o.camera_to_worlds.detach().clone(),
-                         self.init_c2o.fx.detach().clone(),self.init_c2o.fy.detach().clone(),
-                         cx.detach().clone(),cy.detach().clone(),
-                         width.detach().clone(),height.detach().clone())
-        newcam.rescale_output_resolution(500/max(newcam.width,newcam.height))
-        return newcam
-    
-    def set_frame(self, rgb_frame: torch.Tensor, depth: Optional[torch.Tensor] = None):
+    def add_observation(self, frame: PosedObservation, extrapolate_velocity = True):
         """
         Sets the rgb_frame to optimize the pose for
         rgb_frame: HxWxC tensor image
-        init_c2o: initial camera to object transform (given whatever coordinates the self.dig_model is in)
         """
-        if self.use_roi and self.is_initialized:
-            ymin,ymax,xmin,xmax = self.get_ROI()
-            roi_cam = self.get_ROI_cam((ymin,ymax,xmin,xmax))
-            # ROI is determined inside the global camera, so we need to convert it to the right resolution
-            ymin,ymax = int((ymin/(self.init_c2o.height-1))*(rgb_frame.shape[0]-1)),int((ymax/(self.init_c2o.height-1))*(rgb_frame.shape[0]-1))
-            xmin,xmax = int((xmin/(self.init_c2o.width-1))*(rgb_frame.shape[1]-1)),int((xmax/(self.init_c2o.width-1))*(rgb_frame.shape[1]-1))
-            rgb_frame = rgb_frame[ymin:ymax,xmin:xmax].detach().clone()
-            if self.use_depth and depth is not None:
-                depth = depth[ymin:ymax,xmin:xmax].detach().clone()
+        assert self.is_initialized, "Must initialize first with the first frame"
+        if self.config.use_roi:
+            xmin, xmax, ymin, ymax = self.calculate_roi(frame.frame.camera)
+            frame.set_roi(xmin, xmax, ymin, ymax)
+        self.sequence.add_frame(frame)
+        # add another timestep of pose to the part and object poses
+        if extrapolate_velocity and self.obj_delta.shape[0] > 1:
+            with torch.no_grad():
+                # new_obj = extrapolate_poses(self.obj_delta[-2], self.obj_delta[-1],.5)
+                new_parts = extrapolate_poses(self.part_deltas[-2], self.part_deltas[-1],.2)
+                self.obj_delta = torch.nn.Parameter(torch.cat([self.obj_delta, self.obj_delta[-1].unsqueeze(0)], dim=0))
+                self.part_deltas = torch.nn.Parameter(torch.cat([self.part_deltas, new_parts.unsqueeze(0)], dim=0))
         else:
-            roi_cam = self.init_c2o
-
-        with torch.no_grad():
-            self.rgb_frame = resize(
-                rgb_frame.permute(2, 0, 1),
-                (roi_cam.height, roi_cam.width),
-                antialias=True,
-            ).permute(1, 2, 0)
-            self.frame_pca_feats = self.dino_loader.get_pca_feats(
-                rgb_frame.permute(2, 0, 1).unsqueeze(0), keep_cuda=True
-            ).squeeze()
-            self.frame_pca_feats = resize(
-                self.frame_pca_feats.permute(2, 0, 1),
-                (roi_cam.height, roi_cam.width),
-                antialias=True,
-            ).permute(1, 2, 0)
-            # HxWxC
-            if self.use_depth:
-                if depth is None:
-                    depth = get_depth((rgb_frame*255).to(torch.uint8))
-                self.frame_depth = (
-                    resize(
-                        depth.unsqueeze(0),
-                        (roi_cam.height, roi_cam.width),
-                        antialias=True,
-                    )
-                    .squeeze()
-                    .unsqueeze(-1)
-                )
-            if self.mask_hands:
-                self.hand_mask = get_hand_mask((self.rgb_frame * 255).to(torch.uint8))
-                self.hand_mask = (
-                    torch.nn.functional.max_pool2d(
-                        self.hand_mask[None, None], 3, padding=1, stride=1
-                    ).squeeze()
-                    == 0.0
-                )
+            self.obj_delta = torch.nn.Parameter(torch.cat([self.obj_delta, self.obj_delta[-1].unsqueeze(0)], dim=0))
+            self.part_deltas = torch.nn.Parameter(torch.cat([self.part_deltas, self.part_deltas[-1].unsqueeze(0)], dim=0))
+        append_in_optim(self.part_optimizer, [self.part_deltas])
+        zero_optim_state(self.part_optimizer, [-2])
+        if self.config.do_obj_optim:
+            append_in_optim(self.obj_optimizer, [self.obj_delta])
+            zero_optim_state(self.obj_optimizer, [-2])

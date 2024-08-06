@@ -212,7 +212,7 @@ class ToadOptimizer:
         # c2w = self.cam2world.camera_to_worlds.squeeze()  # (3, 4)
         # parts2cam = self.optimizer.get_poses_relative_to_camera(c2w)  # --> (N, 4, 4)
         with torch.no_grad():
-            self.optimizer.apply_to_model(self.optimizer.pose_deltas, self.optimizer.centroids, self.optimizer.group_labels)
+            self.optimizer.apply_to_model(self.optimizer.part_deltas, self.optimizer.centroids, self.optimizer.group_labels)
         points = self.optimizer.dig_model.means.clone().detach()
         colors = SH2RGB(self.optimizer.dig_model.colors.clone().detach())
         points = points / self.optimizer.dataset_scale

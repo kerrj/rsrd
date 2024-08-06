@@ -164,6 +164,7 @@ class SE3(_base.SEBase[SO3]):
             translation=torch.einsum("...ij,...j->...i", V, tangent[..., :3]),
         )
 
+
     @override
     def log(self) -> Tensor:
         # Reference:
