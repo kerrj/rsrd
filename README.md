@@ -1,2 +1,2 @@
-# rsrd
-Code for Robot See Robot Do CoRL 2024
+# Robot See Robot Do
+Code will be released by the CoRL 2024 conference!
