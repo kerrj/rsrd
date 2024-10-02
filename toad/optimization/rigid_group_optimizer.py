@@ -113,28 +113,24 @@ class RigidGroupOptimizer:
         self.init_means = self.dig_model.gauss_params["means"].detach().clone()
         self.init_quats = self.dig_model.gauss_params["quats"].detach().clone()
 
-        self.hand_lefts = [] #list of bools for each hand frame
-        self.hand_frames = [] # hand_frames stores a list of hand vertices and faces for each keyframe, stored in the OBJECT COORDINATE FRAME
-
         # Initialize parts + optimizers.
         if pipeline.cluster_labels is None:
             labels = torch.zeros(pipeline.model.num_points).int().cuda()
         else:
             labels = pipeline.cluster_labels.int().cuda()
-        self.configure_optimizers_and_losses_from_clusters(labels)
+        self.configure_from_clusters(labels)
 
         self.sequence = VideoSequence()
         self.is_initialized = False
 
-    def configure_optimizers_and_losses_from_clusters(self, group_labels: torch.Tensor):
+    def configure_from_clusters(self, group_labels: torch.Tensor):
         """
-        Given `group_labels`, set the group masks and labels, and reset the part optimizer.
+        Given `group_labels`, set the group masks and labels.
 
         Affects all attributes affected by # of parts:
         - `self.num_groups
         - `self.group_labels`
         - `self.group_masks`
-        - `self.part_optimizer`
         - `self.part_deltas`
         - `self.init_p2o`
         - `self.atap`
@@ -151,8 +147,6 @@ class RigidGroupOptimizer:
         part_deltas = torch.zeros(1, self.num_groups, 7, dtype=torch.float32, device="cuda")
         part_deltas[:, :, 0] = 1  # wxyz = [1, 0, 0, 0] is identity.
         self.part_deltas = torch.nn.Parameter(part_deltas)
-
-        self.part_optimizer = torch.optim.Adam([self.part_deltas], lr=self.config.pose_lr)
 
         # Initialize the object pose. Centered at object centroid, and identity rotation.
         self.init_o2w = identity_7vec()
@@ -184,7 +178,6 @@ class RigidGroupOptimizer:
         """
         Initializes object pose w/ observation. Also sets:
         - `self.obj_delta`
-        - `self.obj_optimizer`
         """
         assert not self.is_initialized, "Can only initialize once"
         self.sequence.add_frame(first_obs)
@@ -230,19 +223,18 @@ class RigidGroupOptimizer:
 
         if self.config.do_obj_optim:
             self.obj_delta.requires_grad_(True)
-            self.obj_optimizer = torch.optim.Adam(
-                [self.obj_delta], lr=self.config.pose_lr
-            )
-        else:
-            self.obj_optimizer = None
 
         self.is_initialized = True
+        logger.info("Initialized object pose")
         return renders
 
     def fit(self, frame_indices: list[int] = [], niter=1, all_frames=False):
         # TODO(cmk) temporarily removed all_frames)
         lr_init = self.config.pose_lr
 
+        assert len(frame_indices) == 1
+        idx = frame_indices[0]
+        part_optimizer = torch.optim.Adam([self.part_deltas], lr=lr_init)
         part_scheduler = ExponentialDecayScheduler(
             ExponentialDecaySchedulerConfig(
                 lr_final=self.config.pose_lr_final,
@@ -250,9 +242,10 @@ class RigidGroupOptimizer:
                 ramp="linear",
                 lr_pre_warmup=1e-5,
             )
-        ).get_scheduler(self.part_optimizer, lr_init)
+        ).get_scheduler(part_optimizer, lr_init)
 
-        if self.obj_optimizer and self.config.do_obj_optim:
+        if self.config.do_obj_optim:
+            obj_optimizer = torch.optim.Adam([self.obj_delta], lr=lr_init)
             obj_scheduler = ExponentialDecayScheduler(
                 ExponentialDecaySchedulerConfig(
                     lr_final=self.config.pose_lr_final,
@@ -260,7 +253,7 @@ class RigidGroupOptimizer:
                     ramp="linear",
                     lr_pre_warmup=1e-5,
                 )
-            ).get_scheduler(self.obj_optimizer, lr_init)
+            ).get_scheduler(obj_optimizer, lr_init)
 
         for _ in range(niter):
             # renormalize rotation representation
@@ -268,49 +261,48 @@ class RigidGroupOptimizer:
                 self.part_deltas[..., :4] = self.part_deltas[..., :4] / self.part_deltas[..., :4].norm(dim=-1, keepdim=True)
                 self.obj_delta[..., :4] = self.obj_delta[..., :4] / self.obj_delta[..., :4].norm(dim=-1, keepdim=True)
 
-            self.part_optimizer.zero_grad()
-            if self.obj_optimizer and self.config.do_obj_optim:
-                self.obj_optimizer.zero_grad()
+            part_optimizer.zero_grad()
+            if self.config.do_obj_optim:
+                obj_optimizer.zero_grad()
 
             # Compute loss
-            for idx in frame_indices:
-                tape = wp.Tape()
-                with tape:
-                    this_obj_delta = self.obj_delta[idx].view(1, 7)
-                    this_part_deltas = self.part_deltas[idx]
-                    observation = self.sequence.get_frame(idx)
-                    frame = (
-                        observation.frame
-                        if not self.config.use_roi
-                        else observation.roi_frame
-                    )
-                    loss = self._get_loss(
-                        frame,
-                        this_obj_delta,
-                        this_part_deltas,
-                        self.config.use_depth,
-                        False,
-                        self.config.atap_config.use_atap,
-                        self.config.do_obj_optim,
-                    )
-
-                assert loss is not None
-                loss.backward()
-                tape.backward()  # torch, then tape backward, to propagate gradients to warp kernels.
-
-                # tape backward only propagates up to the slice, so we need to call autograd again to continue.
-                assert this_obj_delta.grad is not None
-                assert this_part_deltas.grad is not None
-                torch.autograd.backward(
-                    [this_obj_delta, this_part_deltas],
-                    grad_tensors=[this_obj_delta.grad, this_part_deltas.grad],
+            tape = wp.Tape()
+            with tape:
+                this_obj_delta = self.obj_delta[idx].view(1, 7)
+                this_part_deltas = self.part_deltas[idx]
+                observation = self.sequence.get_frame(idx)
+                frame = (
+                    observation.frame
+                    if not self.config.use_roi
+                    else observation.roi_frame
+                )
+                loss = self._get_loss(
+                    frame,
+                    this_obj_delta,
+                    this_part_deltas,
+                    self.config.use_depth,
+                    False,
+                    self.config.atap_config.use_atap,
+                    self.config.do_obj_optim,
                 )
 
-            self.part_optimizer.step()
+            assert loss is not None
+            loss.backward()
+            tape.backward()  # torch, then tape backward, to propagate gradients to warp kernels.
+
+            # tape backward only propagates up to the slice, so we need to call autograd again to continue.
+            assert this_obj_delta.grad is not None
+            assert this_part_deltas.grad is not None
+            torch.autograd.backward(
+                [this_obj_delta, this_part_deltas],
+                grad_tensors=[this_obj_delta.grad, this_part_deltas.grad],
+            )
+
+            part_optimizer.step()
             part_scheduler.step()
 
-            if self.obj_optimizer and self.config.do_obj_optim:
-                self.obj_optimizer.step()
+            if self.config.do_obj_optim:
+                obj_optimizer.step()
                 obj_scheduler.step()
 
     def _try_opt(
@@ -596,12 +588,6 @@ class RigidGroupOptimizer:
         self.part_deltas = torch.nn.Parameter(
             torch.cat([self.part_deltas, next_part_delta.unsqueeze(0)], dim=0)
         )
-
-        append_in_optim(self.part_optimizer, [self.part_deltas])
-        zero_optim_state(self.part_optimizer, [-2])
-        if self.config.do_obj_optim:
-            append_in_optim(self.obj_optimizer, [self.obj_delta])
-            zero_optim_state(self.obj_optimizer, [-2])
 
     def create_observation_from_rgb_and_camera(
         self, rgb: np.ndarray, camera: Cameras

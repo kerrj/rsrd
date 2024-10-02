@@ -5,6 +5,7 @@ Known constants for RSRD, e.g., camera intrinsics.
 import numpy as np
 import viser.transforms as vtf
 from dataclasses import dataclass
+import cv2
 
 import torch
 from nerfstudio.cameras.cameras import Cameras
@@ -53,6 +54,7 @@ class GoProIntr(CameraIntr):
     width = 3840
     height = 2160
 
+
 def get_ns_camera_at_origin(cam_intr: CameraIntr) -> Cameras:
     """Initialize a nerfstudio camera at the origin, with known intrinsics."""
     H = np.eye(4)
@@ -68,3 +70,18 @@ def get_ns_camera_at_origin(cam_intr: CameraIntr) -> Cameras:
         cy=cam_intr.cy,
         width=cam_intr.width
     )
+
+def get_vid_frame(cap: cv2.VideoCapture, timestamp: float) -> np.ndarray:
+    """Get frame from video at timestamp (in seconds)."""
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps == 0:
+        raise ValueError("Video has unknown FPS.")
+
+    frame_idx = min(int(timestamp * fps), int(cap.get(cv2.CAP_PROP_FRAME_COUNT) - 1))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    success, frame = cap.read()
+    if not success:
+        raise ValueError(f"Failed to read frame at {timestamp} s.")
+
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    return frame

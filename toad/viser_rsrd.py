@@ -87,7 +87,7 @@ class ViserRSRD:
         )
         self.part_delta_frames.append(
             self.server.scene.add_frame(
-                frame_name + "/delta", # show_axes=False
+                frame_name + "/delta", show_axes=False
             )
         )
 

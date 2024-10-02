@@ -16,50 +16,6 @@ def extrapolate_poses(p1_7v, p2_7v,lam):
     new_t = (t2 @ SE3.from_rotation_and_translation(delta_rot, delta_pos))
     return new_t.wxyz_xyz
 
-def zero_optim_state(optimizer:torch.optim.Adam, timestamps):
-    param = optimizer.param_groups[0]["params"][0]
-    param_state = optimizer.state[param]
-    if "max_exp_avg_sq" in param_state:
-        # for amsgrad
-        param_state["max_exp_avg_sq"][timestamps] = 0.0
-    if "exp_avg" in param_state:
-        param_state["exp_avg"][timestamps] = 0.0
-        param_state["exp_avg_sq"][timestamps] = 0.0
-
-def append_in_optim(optimizer:torch.optim.Adam, new_params):
-    """adds the parameters to the optimizer"""
-    param = optimizer.param_groups[0]["params"][0]
-    param_state = optimizer.state[param]
-    if "max_exp_avg_sq" in param_state:
-        # for amsgrad
-        param_state["max_exp_avg_sq"] = torch.cat(
-            [
-                param_state["max_exp_avg_sq"],
-                param_state["max_exp_avg_sq"][-1].unsqueeze(0)
-            ],
-            dim=0,
-        )
-    if "exp_avg" in param_state:
-        param_state["exp_avg"] = torch.cat(
-            [
-                param_state["exp_avg"],
-                param_state["exp_avg"][-1].unsqueeze(0)
-            ],
-            dim=0,
-        )
-        param_state["exp_avg_sq"] = torch.cat(
-            [
-                param_state["exp_avg_sq"],
-                param_state["exp_avg_sq"][-1].unsqueeze(0)
-            ],
-            dim=0,
-        )
-
-    del optimizer.state[param]
-    optimizer.state[new_params[0]] = param_state
-    optimizer.param_groups[0]["params"] = new_params
-    del param
-
 @wp.func
 def poses_7vec_to_transform(poses: wp.array(dtype=float, ndim=2), i: int):
     """

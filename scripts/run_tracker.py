@@ -28,8 +28,8 @@ from toad.optimization.rigid_group_optimizer import (
     RigidGroupOptimizer,
     RigidGroupOptimizerConfig,
 )
-from toad.cameras import CameraIntr, IPhoneIntr, get_ns_camera_at_origin
-from toad.articulated_gaussians import ViserRSRD
+from toad.cameras import CameraIntr, IPhoneIntr, get_ns_camera_at_origin, get_vid_frame
+from toad.viser_rsrd import ViserRSRD
 
 
 @dataclass
@@ -142,18 +142,6 @@ def generate_keyframes(
 
     # save part trajectories
     optimizer.save_deltas(keyframe_path)
-
-
-def get_vid_frame(cap: cv2.VideoCapture, timestamp: float) -> np.ndarray:
-    """Get frame from video at timestamp (in seconds)."""
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_idx = min(int(timestamp * fps), int(cap.get(cv2.CAP_PROP_FRAME_COUNT) - 1))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-    success, frame = cap.read()
-    if not success:
-        raise ValueError(f"Failed to read frame at {timestamp} s.")
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return frame
 
 
 if __name__ == "__main__":
