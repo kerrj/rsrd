@@ -1,5 +1,5 @@
 import torch
-from typing import List, Optional, Tuple, Callable, Generic, TypeVar
+from typing import Optional, Callable, Generic, TypeVar, TYPE_CHECKING
 from nerfstudio.cameras.cameras import Cameras
 from torchvision.transforms.functional import resize
 from toad.utils import *
@@ -7,6 +7,9 @@ from nerfstudio.model_components.losses import depth_ranking_loss
 from toad.optimization.utils import *
 from copy import deepcopy
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from toad.optimization.rigid_group_optimizer import RigidGroupOptimizer
 
 T = TypeVar('T')
 class Future(Generic[T]):
@@ -148,6 +151,26 @@ class PosedObservation:
         camera.rescale_output_resolution(self.rasterize_resolution/max(camera.width.item(),camera.height.item()))
         self._roi_frame = Frame(rgb, camera, self._dino_fn, self._original_depth)
 
+    def compute_roi(self, optimizer: 'RigidGroupOptimizer'):
+        """
+        Calculate the ROI for the object given a certain camera pose
+        """
+        with torch.no_grad():
+            outputs = optimizer.dig_model.get_outputs(self.frame.camera)
+            object_mask = outputs["accumulation"] > optimizer.config.mask_threshold
+            valids = torch.where(object_mask)
+            valid_xs = valids[1]/object_mask.shape[1]
+            valid_ys = valids[0]/object_mask.shape[0]#normalize to 0-1
+            inflate_amnt = (optimizer.config.roi_inflate*(valid_xs.max() - valid_xs.min()).item(),
+                            optimizer.config.roi_inflate*(valid_ys.max() - valid_ys.min()).item())# x, y
+            xmin, xmax, ymin, ymax = max(0,valid_xs.min().item() - inflate_amnt[0]), min(1,valid_xs.max().item() + inflate_amnt[0]),\
+                                max(0,valid_ys.min().item() - inflate_amnt[1]), min(1,valid_ys.max().item() + inflate_amnt[1])
+        return xmin, xmax, ymin, ymax
+
+    def compute_and_set_roi(self, optimizer):
+        roi = self.compute_roi(optimizer)
+        self.set_roi(*roi)
+
 
 class VideoSequence:
     def __init__(self):
@@ -155,9 +178,6 @@ class VideoSequence:
 
     def add_frame(self, frame:PosedObservation, idx:int =-1):
         self.frames.append(frame)
-
-    def get_last_frame(self) -> PosedObservation:
-        return self.frames[-1]
 
     def get_frame(self, idx:int) -> PosedObservation:
         return self.frames[idx]

@@ -11,6 +11,7 @@ from threading import Lock
 import cv2
 import numpy as np
 import torch
+torch.set_float32_matmul_precision('high')
 import tqdm
 import warp as wp
 
@@ -48,6 +49,8 @@ class RSRDTrackerConfig:
 
 def main(exp: RSRDTrackerConfig):
     """Track objects in video using RSRD."""
+    exp.base_output_folder.mkdir(parents=True, exist_ok=True)
+
     # Load video.
     assert exp.video_path.exists(), f"Video path {exp.video_path} does not exist."
     video = cv2.VideoCapture(str(exp.video_path.absolute()))
@@ -72,23 +75,10 @@ def main(exp: RSRDTrackerConfig):
     except FileNotFoundError:
         print("No state found, starting from scratch")
 
-    if pipeline.cluster_labels is not None:
-        labels = pipeline.cluster_labels.int().cuda()
-        group_masks = [(cid == labels).cuda() for cid in range(labels.max() + 1)]
-    else:
-        labels = torch.zeros(pipeline.model.num_points).int().cuda()
-        group_masks = [torch.ones(pipeline.model.num_points).bool().cuda()]
-    logger.info(f"Loaded pipeline with {len(group_masks)} groups.")
-
     # Initialize tracker.
-    dino_loader = pipeline.datamanager.dino_dataloader
     optimizer = RigidGroupOptimizer(
         exp.optimizer_config,
-        pipeline.model,
-        dino_loader,
-        group_masks,
-        group_labels=labels,
-        dataset_scale=pipeline.datamanager.train_dataset._dataparser_outputs.dataparser_scale,
+        pipeline,
         render_lock=viewer_lock,
     )
     logger.info("Initialized tracker.")
@@ -97,7 +87,7 @@ def main(exp: RSRDTrackerConfig):
     keyframe_path = exp.base_output_folder / "keyframes.pt"
     if not keyframe_path.exists():
         generate_keyframes(optimizer, video, exp.camera_type, keyframe_path)
-    optimizer.load_trajectory(keyframe_path)
+    optimizer.load_deltas(keyframe_path)
 
     server = viser.ViserServer()
     viser_rsrd = ViserRSRD(server, optimizer)
@@ -109,10 +99,6 @@ def main(exp: RSRDTrackerConfig):
         tstep = track_slider.value
         obj_delta = optimizer.obj_delta[tstep]
         part_deltas = optimizer.part_deltas[tstep]
-
-        # swap from xyz_wxyz to wxyz_xyz
-        obj_delta = torch.cat([obj_delta[..., 3:], obj_delta[..., :3]], dim=-1)
-        part_deltas = torch.cat([part_deltas[..., 3:], part_deltas[..., :3]], dim=-1)
 
         viser_rsrd.update_cfg(obj_delta, part_deltas)
         time.sleep(0.05)
@@ -135,7 +121,12 @@ def generate_keyframes(
     frame = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
 
     # Initialize.
-    optimizer.initialize_obj_pose(frame, render=False, niter=300, n_seeds=5)
+    renders = optimizer.initialize_obj_pose(frame, render=True, niter=100, n_seeds=5)
+
+    # Save the frames.
+    import moviepy.editor as mpy
+    out_clip = mpy.ImageSequenceClip(renders, fps=30)
+    out_clip.write_videofile(str("test_camopt.mp4"))
 
     # Add each frame, optimize them separately.
     for frame_id in tqdm.trange(0, num_frames):
@@ -143,13 +134,14 @@ def generate_keyframes(
         rgb = get_vid_frame(motion_clip, timestamp)
         frame = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
         optimizer.add_observation(frame)
-        optimizer.step(50)
+        optimizer.fit([-1], 50)
 
     # Smooth all frames, together.
-    optimizer.step(all_frames=True, niter=50)
+    # optimizer.optimize_frames(all_frames=True, niter=50)
+    logger.warning("Skipping all-frame optimization.")
 
     # save part trajectories
-    optimizer.save_trajectory(keyframe_path)
+    optimizer.save_deltas(keyframe_path)
 
 
 def get_vid_frame(cap: cv2.VideoCapture, timestamp: float) -> np.ndarray:

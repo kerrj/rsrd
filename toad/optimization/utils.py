@@ -6,15 +6,15 @@ from nerfstudio.cameras.cameras import Cameras
 
 
 def extrapolate_poses(p1_7v, p2_7v,lam):
-    r1 = SO3(p1_7v[...,3:])
-    t1 = SE3.from_rotation_and_translation(r1, p1_7v[...,:3])
-    r2 = SO3(p2_7v[...,3:])
-    t2 = SE3.from_rotation_and_translation(r2, p2_7v[...,:3])
+    r1 = SO3(p1_7v[...,:4])
+    t1 = SE3.from_rotation_and_translation(r1, p1_7v[...,4:])
+    r2 = SO3(p2_7v[...,:4])
+    t2 = SE3.from_rotation_and_translation(r2, p2_7v[...,4:])
     t_2_1 = t1.inverse() @ t2
     delta_pos = t_2_1.translation()*lam
     delta_rot = SO3.exp((t_2_1.rotation().log()*lam))
     new_t = (t2 @ SE3.from_rotation_and_translation(delta_rot, delta_pos))
-    return new_t.wxyz_xyz.roll(3,dims=-1)
+    return new_t.wxyz_xyz
 
 def zero_optim_state(optimizer:torch.optim.Adam, timestamps):
     param = optimizer.param_groups[0]["params"][0]
@@ -63,23 +63,23 @@ def append_in_optim(optimizer:torch.optim.Adam, new_params):
 @wp.func
 def poses_7vec_to_transform(poses: wp.array(dtype=float, ndim=2), i: int):
     """
-    Kernel helper for converting x y z qw qx qy qz to a wp.Transformation
+    Kernel helper for converting wxyz_xyz to a wp.Transformation (xyzw, xyz).
     """
-    position = wp.vector(poses[i,0], poses[i,1], poses[i,2])
-    quaternion = wp.quaternion(poses[i,4], poses[i,5], poses[i,6], poses[i,3])
+    quaternion = wp.quaternion(poses[i,1], poses[i,2], poses[i,3], poses[i,0])
+    position = wp.vector(poses[i,4], poses[i,5], poses[i,6])
     return wp.transformation(position, quaternion)
 
 @wp.func
 def poses_7vec_to_transform(poses: wp.array(dtype=float, ndim=3), i: int, j: int):
     """
-    Kernel helper for converting x y z qw qx qy qz to a wp.Transformation
+    Kernel helper for converting wxyz_xyz to a wp.Transformation
     """
-    position = wp.vector(poses[i, j, 0], poses[i, j, 1], poses[i, j, 2])
-    quaternion = wp.quaternion(poses[i, j, 4], poses[i, j, 5], poses[i, j, 6], poses[i, j, 3])
+    quaternion = wp.quaternion(poses[i, j, 1], poses[i, j, 2], poses[i, j, 3], poses[i, j, 0])
+    position = wp.vector(poses[i, j, 4], poses[i, j, 5], poses[i, j, 6])
     return wp.transformation(position, quaternion)
 
 @wp.kernel
-def apply_to_model(
+def apply_to_model_warp(
     init_o2w: wp.array(dtype=float, ndim=2),
     init_p2os: wp.array(dtype=float, ndim=2),
     o_delta: wp.array(dtype=float, ndim=2),
@@ -121,7 +121,7 @@ def apply_to_model(
     quats_out[tid, 3] = new_quat[2] #z
 
 @wp.kernel
-def traj_smoothness_loss(
+def traj_smoothness_loss_warp(
     deltas: wp.array(dtype=float, ndim=3),
     position_lambda: float,
     rotation_lambda: float,
@@ -157,14 +157,15 @@ def traj_smoothness_loss(
 
 def identity_7vec(device='cuda'):
     """
-    Returns a 7-tensor of identity pose
+    Returns a 7-tensor of identity pose, as wxyz_xyz.
     """
-    return torch.tensor([[0, 0, 0, 1, 0, 0, 0]], dtype=torch.float32, device=device)
+    return torch.tensor([[1, 0, 0, 0, 0, 0, 0]], dtype=torch.float32, device=device)
 
 def normalized_quat_to_rotmat(quat):
     """
     Converts a quaternion to a 3x3 rotation matrix
     """
+    raise NotImplementedError("This function is not used")
     assert quat.shape[-1] == 4, quat.shape
     w, x, y, z = torch.unbind(quat, dim=-1)
     mat = torch.stack(
@@ -190,6 +191,7 @@ def torch_posevec_to_mat(posevecs):
     posevecs: Nx7 tensor of pose vectors
     returns: Nx4x4 tensor of transformation matrices
     """
+    raise NotImplementedError("This function is not used")
     assert posevecs.shape[-1] == 7, posevecs.shape
     assert len(posevecs.shape) == 2, posevecs.shape
     out = torch.eye(4, device=posevecs.device).unsqueeze(0).expand(posevecs.shape[0], -1, -1).clone()
@@ -216,8 +218,8 @@ def mnn_matcher(feat_a, feat_b):
 def crop_camera(camera: Cameras, xmin, xmax, ymin, ymax):
     height = torch.tensor(ymax - ymin,device='cuda').view(1,1).int()
     width = torch.tensor(xmax - xmin,device='cuda').view(1,1).int()
-    cx = torch.tensor(camera.cx.clone() - xmin,device='cuda').view(1,1)
-    cy = torch.tensor(camera.cy.clone() - ymin,device='cuda').view(1,1)
+    cx = torch.tensor(camera.cx.clone().detach() - xmin,device='cuda').view(1,1)
+    cy = torch.tensor(camera.cy.clone().detach() - ymin,device='cuda').view(1,1)
     fx = camera.fx.clone()
     fy = camera.fy.clone()
     return Cameras(camera.camera_to_worlds.clone(), fx, fy, cx, cy, width, height)

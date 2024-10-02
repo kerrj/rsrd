@@ -79,10 +79,10 @@ class ViserRSRD:
         opacities = dig_model.opacities.sigmoid()[group_mask].detach().cpu().numpy()
 
         # Add the frame to the scene. Convention is xyz_wxyz.
-        p2o_7vec = self.optimizer.init_p2o_7vec[group_idx].cpu().numpy()
+        p2o_7vec = self.optimizer.init_p2o[group_idx].cpu().numpy()
         self.part_frames.append(
             self.server.scene.add_frame(
-                frame_name, position=p2o_7vec[:3], wxyz=p2o_7vec[3:], show_axes=False
+                frame_name, position=p2o_7vec[4:], wxyz=p2o_7vec[:4], show_axes=False
             )
         )
         self.part_delta_frames.append(

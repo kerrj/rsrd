@@ -4,6 +4,8 @@ from typing import List
 from lerf.dig import DiGModel
 import warp as wp
 from dataclasses import dataclass
+from loguru import logger
+
 #https://openaccess.thecvf.com/content_CVPR_2019/papers/Barron_A_General_and_Adaptive_Robust_Loss_Function_CVPR_2019_paper.pdf
 @wp.func
 def jon_loss(x: float,alpha:float, c:float):
@@ -29,7 +31,7 @@ class ATAPConfig:
     touch_radius: float = .0015
     N: int = 500
     loss_mult: float = .2
-    loss_alpha: float = 1.0#rule: for jointed, use 1.0 alpha, for non-jointed use 0.1 ish
+    loss_alpha: float = 0.1 #rule: for jointed, use 1.0 alpha, for non-jointed use 0.1 ish
 
 class ATAPLoss:
     def __init__(self, config: ATAPConfig, dig_model: DiGModel, group_masks: List[torch.Tensor], group_labels: torch.Tensor, dataset_scale: float = 1.0):
@@ -40,7 +42,7 @@ class ATAPLoss:
         if not self.config.use_atap:
             return
         self.touch_radius = config.touch_radius * dataset_scale
-        print(f"Touch radius is {self.touch_radius}")
+        logger.info(f"Touch radius is {self.touch_radius}")
         self.dig_model = dig_model
         self.group_masks = group_masks
         self.group_labels = group_labels
@@ -49,7 +51,7 @@ class ATAPLoss:
             with torch.no_grad():
                 dists, ids, match_ids, group_ids1, group_ids = self._radius_nn(grp, self.touch_radius)
                 self.nn_info.append((dists, ids, match_ids, group_ids1, group_ids))
-                print(f"Group {len(self.nn_info)} has {len(ids)} neighbors")
+                logger.info(f"Group {len(self.nn_info)} has {len(ids)} neighbors")
         self.dists = torch.cat([x[0] for x in self.nn_info]).cuda()
         self.ids = torch.cat([x[1] for x in self.nn_info]).cuda().int()
         self.match_ids = torch.cat([x[2] for x in self.nn_info]).cuda().int()
