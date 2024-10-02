@@ -613,3 +613,9 @@ class RigidGroupOptimizer:
         if self.config.do_obj_optim:
             append_in_optim(self.obj_optimizer, [self.obj_delta])
             zero_optim_state(self.obj_optimizer, [-2])
+        
+    def create_observation_from_rgb_and_camera(self, rgb: np.ndarray, camera: Cameras) -> PosedObservation:
+        dino_fn = lambda x: self.dino_loader.get_pca_feats(x, keep_cuda=True)
+        target_frame_rgb = ToTensor()(Image.fromarray(rgb)).permute(1, 2, 0).cuda()
+        frame = PosedObservation(target_frame_rgb, camera, dino_fn)
+        return frame
