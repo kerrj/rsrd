@@ -1,50 +1,35 @@
-import torch
-import matplotlib.pyplot as plt
-from nerfstudio.utils.eval_utils import eval_setup
+from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
+from typing import List, Optional, Tuple, cast, Union
+
+import kornia
 import numpy as np
-from nerfstudio.viewer.viewer import Viewer
-from nerfstudio.pipelines.base_pipeline import Pipeline
-from nerfstudio.configs.base_config import ViewerConfig
-import cv2
+import torch
 from torchvision.transforms import ToTensor
 from PIL import Image
-from typing import List, Optional, Literal, Callable, cast
-from nerfstudio.utils import writer
-import time
-from threading import Lock
-import kornia
-from lerf.dig import DiGModel
-from lerf.data.utils.dino_dataloader import DinoDataloader
+from loguru import logger
+from tqdm import tqdm
+from jaxtyping import Float
+import warp as wp
+
 from nerfstudio.cameras.cameras import Cameras
-from copy import deepcopy
-from torchvision.transforms.functional import resize
-from contextlib import nullcontext
 from nerfstudio.engine.schedulers import (
     ExponentialDecayScheduler,
     ExponentialDecaySchedulerConfig,
 )
-import warp as wp
-from toad.optimization.atap_loss import ATAPLoss, ATAPConfig
-from toad.utils import *
-import toad.transforms as vtf
-import trimesh
-from typing import Tuple
 from nerfstudio.model_components.losses import depth_ranking_loss
-from toad.optimization.utils import (
-    apply_to_model_warp,
-    traj_smoothness_loss_warp,
-    append_in_optim,
-    zero_optim_state,
-    extrapolate_poses,
-    identity_7vec,
-    mnn_matcher,
-)
+from nerfstudio.pipelines.base_pipeline import Pipeline
+
+from lerf.dig import DiGModel
+from lerf.data.utils.dino_dataloader import DinoDataloader
+
+import toad.transforms as vtf
+from toad.optimization.atap_loss import ATAPLoss, ATAPConfig
 from toad.optimization.observation import PosedObservation, VideoSequence, Frame
-from tqdm import tqdm
-from dataclasses import dataclass
-from jaxtyping import Float
-from loguru import logger
+from toad.util.warp_kernels import apply_to_model_warp
+from toad.util.common import identity_7vec, extrapolate_poses, mnn_matcher
 
 @dataclass
 class RigidGroupOptimizerConfig:
@@ -77,11 +62,11 @@ class RigidGroupOptimizer:
     init_means: torch.Tensor
     init_quats: torch.Tensor
     init_o2w: torch.Tensor
-    init_p2o: Float[torch.Tensor, "group 7"]
+    init_p2o: Float[torch.Tensor, "group 7"]  # noqa: F722
 
     is_initialized: bool
-    obj_delta: Float[torch.nn.Parameter, "time 7"]
-    part_deltas: Float[torch.nn.Parameter, "time group 7"]
+    obj_delta: Float[torch.nn.Parameter, "time 7"]  # noqa: F722
+    part_deltas: Float[torch.nn.Parameter, "time group 7"]  # noqa: F722
 
     def __init__(
         self,
@@ -180,7 +165,7 @@ class RigidGroupOptimizer:
         - `self.obj_delta`
         """
         assert not self.is_initialized, "Can only initialize once"
-        self.sequence.add_frame(first_obs)
+        self.sequence.add_obs(first_obs)
 
         renders = []
 
@@ -234,6 +219,8 @@ class RigidGroupOptimizer:
 
         assert len(frame_indices) == 1
         idx = frame_indices[0]
+
+        optimizers, schedulers = [], []
         part_optimizer = torch.optim.Adam([self.part_deltas], lr=lr_init)
         part_scheduler = ExponentialDecayScheduler(
             ExponentialDecaySchedulerConfig(
@@ -243,6 +230,8 @@ class RigidGroupOptimizer:
                 lr_pre_warmup=1e-5,
             )
         ).get_scheduler(part_optimizer, lr_init)
+        optimizers.append(part_optimizer)
+        schedulers.append(part_scheduler)
 
         if self.config.do_obj_optim:
             obj_optimizer = torch.optim.Adam([self.obj_delta], lr=lr_init)
@@ -254,6 +243,8 @@ class RigidGroupOptimizer:
                     lr_pre_warmup=1e-5,
                 )
             ).get_scheduler(obj_optimizer, lr_init)
+            optimizers.append(obj_optimizer)
+            schedulers.append(obj_scheduler)
 
         for _ in range(niter):
             # renormalize rotation representation
@@ -261,16 +252,15 @@ class RigidGroupOptimizer:
                 self.part_deltas[..., :4] = self.part_deltas[..., :4] / self.part_deltas[..., :4].norm(dim=-1, keepdim=True)
                 self.obj_delta[..., :4] = self.obj_delta[..., :4] / self.obj_delta[..., :4].norm(dim=-1, keepdim=True)
 
-            part_optimizer.zero_grad()
-            if self.config.do_obj_optim:
-                obj_optimizer.zero_grad()
+            for optimizer in optimizers:
+                optimizer.zero_grad()
 
             # Compute loss
             tape = wp.Tape()
             with tape:
                 this_obj_delta = self.obj_delta[idx].view(1, 7)
                 this_part_deltas = self.part_deltas[idx]
-                observation = self.sequence.get_frame(idx)
+                observation = self.sequence.get_obs(idx)
                 frame = (
                     observation.frame
                     if not self.config.use_roi
@@ -298,12 +288,11 @@ class RigidGroupOptimizer:
                 grad_tensors=[this_obj_delta.grad, this_part_deltas.grad],
             )
 
-            part_optimizer.step()
-            part_scheduler.step()
+            for optimizer in optimizers:
+                optimizer.step()
+            for scheduler in schedulers:
+                scheduler.step()
 
-            if self.config.do_obj_optim:
-                obj_optimizer.step()
-                obj_scheduler.step()
 
     def _try_opt(
         self,
@@ -355,6 +344,7 @@ class RigidGroupOptimizer:
             if render:
                 with torch.no_grad():
                     dig_outputs = self.dig_model.get_outputs(frame.camera)
+                assert isinstance(dig_outputs["rgb"], torch.Tensor)
                 renders.append((dig_outputs["rgb"].detach() * 255).int().cpu().numpy())
 
         return loss, pose.data.detach(), renders
@@ -463,7 +453,7 @@ class RigidGroupOptimizer:
         object_mask: torch.Tensor,
         n_samples_for_ranking: int = 20000,
     ) -> torch.Tensor:
-        if frame.metric_depth:
+        if frame.has_metric_depth:
             physical_depth = outputs["depth"] / self.dataset_scale
 
             valids = object_mask & (~frame.depth.isnan())
@@ -537,7 +527,10 @@ class RigidGroupOptimizer:
         """
         Applies the ith keyframe to the pose_deltas
         """
-        self.apply_to_model(self.obj_delta[i], self.part_deltas[i])
+        self.apply_to_model(
+            self.obj_delta[i].view(-1, 7),
+            self.part_deltas[i].view(-1, 7)
+        )
 
     def load_deltas(self, path: Path):
         """
@@ -571,7 +564,7 @@ class RigidGroupOptimizer:
 
         if self.config.use_roi:
             obs.compute_and_set_roi(self)
-        self.sequence.add_frame(obs)
+        self.sequence.add_obs(obs)
 
         # add another timestep of pose to the part and object poses
         self.obj_delta = torch.nn.Parameter(
@@ -593,7 +586,8 @@ class RigidGroupOptimizer:
         self, rgb: np.ndarray, camera: Cameras
     ) -> PosedObservation:
         target_frame_rgb = ToTensor()(Image.fromarray(rgb)).permute(1, 2, 0).cuda()
-        dino_fn = lambda x: self.dino_loader.get_pca_feats(x, keep_cuda=True)
+        def dino_fn(x):
+            return self.dino_loader.get_pca_feats(x, keep_cuda=True)
         frame = PosedObservation(target_frame_rgb, camera, dino_fn)
         return frame
 

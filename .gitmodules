@@ -1,0 +1,3 @@
+[submodule "dependencies/hamer_helper"]
+	path = dependencies/hamer_helper
+	url = git@github.com:brentyi/hamer_helper.git

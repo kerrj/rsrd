@@ -2,16 +2,16 @@
 Script for running the tracker.
 """
 
-import datetime
+import pickle
+import trimesh
+from typing import cast
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 
 import cv2
-import numpy as np
 import torch
-torch.set_float32_matmul_precision('high')
 import tqdm
 import warp as wp
 
@@ -28,8 +28,10 @@ from toad.optimization.rigid_group_optimizer import (
     RigidGroupOptimizer,
     RigidGroupOptimizerConfig,
 )
-from toad.cameras import CameraIntr, IPhoneIntr, get_ns_camera_at_origin, get_vid_frame
-from toad.viser_rsrd import ViserRSRD
+from toad.extras.cameras import CameraIntr, IPhoneIntr, get_ns_camera_at_origin, get_vid_frame
+from toad.extras.viser_rsrd import ViserRSRD
+
+torch.set_float32_matmul_precision('high')
 
 
 @dataclass
@@ -85,15 +87,23 @@ def main(exp: RSRDTrackerConfig):
 
     # Load (and generate if necessary) keyframes.
     keyframe_path = exp.base_output_folder / "keyframes.pt"
+    hand_path = exp.base_output_folder / "hands.pkl"
     if not keyframe_path.exists():
-        generate_keyframes(optimizer, video, exp.camera_type, keyframe_path)
+        generate_keyframes(optimizer, video, exp.camera_type, keyframe_path, hand_path)
+
     optimizer.load_deltas(keyframe_path)
+    with hand_path.open("rb") as f:
+        hands = cast(
+            dict[int, list[trimesh.Trimesh]],
+            pickle.load(f)
+        )
 
     server = viser.ViserServer()
     viser_rsrd = ViserRSRD(server, optimizer)
 
     timesteps = len(optimizer.obj_delta)
     track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
+    hands_handle = None
 
     while True:
         tstep = track_slider.value
@@ -101,6 +111,14 @@ def main(exp: RSRDTrackerConfig):
         part_deltas = optimizer.part_deltas[tstep]
 
         viser_rsrd.update_cfg(obj_delta, part_deltas)
+
+        if hands.get(tstep, None) is not None:
+            hands_handle = server.scene.add_mesh_trimesh(
+                "hands", sum(hands[tstep], trimesh.Trimesh())
+            )
+        elif hands_handle is not None:
+            hands_handle.visible = False
+
         time.sleep(0.05)
         track_slider.value = (tstep + 1) % timesteps
 
@@ -111,17 +129,19 @@ def generate_keyframes(
     motion_clip: cv2.VideoCapture,
     camera_type: CameraIntr,
     keyframe_path: Path,
+    hand_path: Path,
 ):
     """Get part poses for each frame in the video, ad save the keyframes to a file. """
     camera = get_ns_camera_at_origin(camera_type)
     num_frames = int(motion_clip.get(cv2.CAP_PROP_FRAME_COUNT))
+    num_frames = 10
     fps = motion_clip.get(cv2.CAP_PROP_FPS)
 
     rgb = get_vid_frame(motion_clip, 0)
-    frame = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
+    obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
 
     # Initialize.
-    renders = optimizer.initialize_obj_pose(frame, render=True, niter=100, n_seeds=5)
+    renders = optimizer.initialize_obj_pose(obs, render=True, niter=100, n_seeds=5)
 
     # Save the frames.
     import moviepy.editor as mpy
@@ -132,17 +152,34 @@ def generate_keyframes(
     for frame_id in tqdm.trange(0, num_frames):
         timestamp = frame_id / fps
         rgb = get_vid_frame(motion_clip, timestamp)
-        frame = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
-        optimizer.add_observation(frame)
+        obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
+        optimizer.add_observation(obs)
         optimizer.fit([-1], 50)
 
-    # Smooth all frames, together.
-    # optimizer.optimize_frames(all_frames=True, niter=50)
-    logger.warning("Skipping all-frame optimization.")
+    # Get 3D hands.
+    hands_dict = {}
+    for frame_id in tqdm.trange(0, num_frames, desc="Detecting hands"):
+        with torch.no_grad():
+            optimizer.apply_keyframe(frame_id)
+            outputs = cast(
+                dict[str, torch.Tensor],
+                optimizer.dig_model.get_outputs(obs.frame.camera)
+            )
+            rendered_scaled_depth = outputs['depth'] / optimizer.dataset_scale
+            hands_3d = obs.frame.get_hand_3d(rendered_scaled_depth)
+            print(len(hands_3d))
+            if len(hands_3d) > 0:
+                hands_dict[frame_id] = hands_3d
 
-    # save part trajectories
+    # Smooth all frames, together.
+    logger.warning("Skipping all-frame smoothing optimization.")
+
+    # Save part trajectories.
     optimizer.save_deltas(keyframe_path)
 
+    # Save the hands.
+    with hand_path.open("wb") as f:
+        pickle.dump(hands_dict, f)
 
 if __name__ == "__main__":
     # Must be called before any other warp API call.
