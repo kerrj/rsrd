@@ -21,6 +21,7 @@ class CameraIntr:
 
 @dataclass
 class IPhoneIntr(CameraIntr):
+    # TODO(cmk) get iphone model.
     name: str = "iphone"
     fx: float = 1137.0
     fy: float = 1137.0
@@ -29,6 +30,7 @@ class IPhoneIntr(CameraIntr):
     width: int = 1280
 
 class MXIPhoneIntr(CameraIntr):
+    # TODO(cmk) get iphone model.
     name: str = "mx_iphone"
     fx = 1085.0
     fy = 1085.0
