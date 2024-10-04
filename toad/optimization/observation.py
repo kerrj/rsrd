@@ -94,18 +94,16 @@ class Frame:
         return hand_mask.cpu().pin_memory()
 
     @torch.no_grad()
-    def get_hand_3d(self, rendered_scaled_depth: torch.Tensor) -> list[trimesh.Trimesh]:
+    def get_hand_3d(self, object_mask: torch.Tensor, rendered_scaled_depth: torch.Tensor) -> list[trimesh.Trimesh]:
         focal = self.camera.fx.item() * (
             max(self.rgb.shape[0], self.rgb.shape[1])
             / PosedObservation.rasterize_resolution
         )
         left, right = Hand3DDetector.detect_hands(self.rgb, focal)
-        if left is not None or right is not None:
-            breakpoint()
         hands = Hand3DDetector.get_aligned_hands_3d(
             [left, right],
             self.depth,
-            self.hand_mask,
+            object_mask,
             rendered_scaled_depth,
             focal,
         )

@@ -11,11 +11,13 @@ from pathlib import Path
 from threading import Lock
 
 import cv2
+import numpy as np
 import torch
 import tqdm
 import warp as wp
 
 import viser
+import viser.transforms as vtf
 import tyro
 from loguru import logger
 
@@ -97,30 +99,39 @@ def main(exp: RSRDTrackerConfig):
             dict[int, list[trimesh.Trimesh]],
             pickle.load(f)
         )
+    for frame_id, hand_list in hands.items():
+        for hand in hand_list:
+            hand.vertices *= optimizer.dataset_scale
 
     server = viser.ViserServer()
-    viser_rsrd = ViserRSRD(server, optimizer)
+    viser_rsrd = ViserRSRD(server, optimizer, base_frame_name="/object")
 
     timesteps = len(optimizer.obj_delta)
     track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
+    play_checkbox = server.gui.add_checkbox("play", False)
     hands_handle = None
 
     while True:
+        if play_checkbox.value:
+            track_slider.value = (track_slider.value + 1) % timesteps
+
         tstep = track_slider.value
         obj_delta = optimizer.obj_delta[tstep]
         part_deltas = optimizer.part_deltas[tstep]
 
         viser_rsrd.update_cfg(obj_delta, part_deltas)
 
+        # TODO(cmk) Remvoe magic np.pi/4 here -- related to `get_ns_camera_at_origin`.
+        server.scene.add_frame("/cam", wxyz=vtf.SO3.from_x_radians(np.pi/4).wxyz)
+        server.scene.add_frame("/cam/foo", wxyz=vtf.SO3.from_x_radians(np.pi).wxyz)
         if hands.get(tstep, None) is not None:
             hands_handle = server.scene.add_mesh_trimesh(
-                "hands", sum(hands[tstep], trimesh.Trimesh())
+                "/cam/foo/hands", sum(hands[tstep], trimesh.Trimesh())
             )
         elif hands_handle is not None:
             hands_handle.visible = False
 
         time.sleep(0.05)
-        track_slider.value = (tstep + 1) % timesteps
 
 
 # But this should _really_ be in the rigid optimizer.
@@ -134,7 +145,6 @@ def generate_keyframes(
     """Get part poses for each frame in the video, ad save the keyframes to a file. """
     camera = get_ns_camera_at_origin(camera_type)
     num_frames = int(motion_clip.get(cv2.CAP_PROP_FRAME_COUNT))
-    num_frames = 10
     fps = motion_clip.get(cv2.CAP_PROP_FPS)
 
     rgb = get_vid_frame(motion_clip, 0)
@@ -161,13 +171,17 @@ def generate_keyframes(
     for frame_id in tqdm.trange(0, num_frames, desc="Detecting hands"):
         with torch.no_grad():
             optimizer.apply_keyframe(frame_id)
+            curr_obs = optimizer.sequence.obs[frame_id]
             outputs = cast(
                 dict[str, torch.Tensor],
-                optimizer.dig_model.get_outputs(obs.frame.camera)
+                optimizer.dig_model.get_outputs(curr_obs.frame.camera)
             )
             rendered_scaled_depth = outputs['depth'] / optimizer.dataset_scale
-            hands_3d = obs.frame.get_hand_3d(rendered_scaled_depth)
-            print(len(hands_3d))
+            object_mask = outputs['accumulation'] > optimizer.config.mask_threshold
+            
+            # Hands in camera frame.
+            hands_3d = curr_obs.frame.get_hand_3d(object_mask, rendered_scaled_depth)
+
             if len(hands_3d) > 0:
                 hands_dict[frame_id] = hands_3d
 

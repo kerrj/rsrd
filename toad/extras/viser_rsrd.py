@@ -41,7 +41,16 @@ class ViserRSRD:
         self.optimizer.reset_transforms()
 
         self.base_frame_name = base_frame_name
-        self.base_frame = self.server.scene.add_frame(self.base_frame_name, show_axes=False)
+
+        init_o2w = vtf.SE3(self.optimizer.init_o2w.squeeze().detach().cpu().numpy())
+        obj_to_cam = init_o2w
+
+        self.base_frame = self.server.scene.add_frame(
+            self.base_frame_name,
+            show_axes=False,
+            position=obj_to_cam.translation(),
+            wxyz=obj_to_cam.rotation().wxyz,
+        )
         self.base_delta_frame = self.server.scene.add_frame(
             self.base_frame_name + "/delta", show_axes=False
         )

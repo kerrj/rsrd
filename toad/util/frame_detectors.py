@@ -57,7 +57,10 @@ class Hand3DDetector:
         left, right = cast(
             HamerHelper,
             cls.hamer_helper.retrieve()
-        ).look_for_hands(image.cpu().numpy(), focal_length=focal)
+        ).look_for_hands(
+            (image * 255).cpu().numpy().astype(np.uint8),
+            focal_length=focal
+        )
         return left, right
 
     @classmethod
@@ -69,13 +72,11 @@ class Hand3DDetector:
         rendered_scaled_depth: torch.Tensor, 
         focal_length: float
     ) -> list[trimesh.Trimesh]:
-        obj_rendered_depth = monodepth[object_mask]
-
         # Get shift/scale for matching monodepth to object depth.
         monodepth_scale = rendered_scaled_depth[object_mask].std() / monodepth[object_mask].std()
         monodepth_aligned = (
             monodepth - monodepth[object_mask].mean()
-        ) * monodepth_scale + obj_rendered_depth.mean()
+        ) * monodepth_scale + rendered_scaled_depth[object_mask].mean()
 
         hands = []
         for hand_output in hand_outputs:
@@ -106,17 +107,17 @@ class Hand3DDetector:
         ).render_detection(
             hand_output,
             hand_idx,
-            monodepth_aligned.shape[1],
             monodepth_aligned.shape[0],
+            monodepth_aligned.shape[1],
             focal_length,
         )
         hand_depth = torch.from_numpy(hand_depth).cuda().float()
         hand_mask = torch.from_numpy(hand_mask).cuda()
 
         # Get shift (no scale!) to match hand depth to monodepth.
-        hand_shift = hand_depth[hand_mask].mean() - monodepth_aligned[hand_mask].mean()
+        hand_shift = (hand_depth[hand_mask].mean() - monodepth_aligned[hand_mask].mean()).item()
         hand_mesh = trimesh.Trimesh(
-            vertices=hand_output["verts"][hand_idx] - hand_shift,
+            vertices=hand_output["verts"][hand_idx] - np.array([0, 0, hand_shift]),
             faces=hand_output["faces"],
         )
         return hand_mesh
