@@ -25,7 +25,7 @@ from nerfstudio.pipelines.base_pipeline import Pipeline
 from lerf.dig import DiGModel
 from lerf.data.utils.dino_dataloader import DinoDataloader
 
-import toad.transforms as vtf
+import toad.transforms as tf
 from toad.optimization.atap_loss import ATAPLoss, ATAPConfig
 from toad.optimization.observation import PosedObservation, VideoSequence, Frame
 from toad.util.warp_kernels import apply_to_model_warp
@@ -48,6 +48,9 @@ class RigidGroupOptimizerConfig:
     mask_threshold: float = 0.8
     rgb_loss_weight: float = 0.05
     part_still_weight: float = 0.01
+
+    approx_dist_to_obj: float = 0.4  # in meters
+    altitude_down: float = np.pi / 4  # in radians
 
 class RigidGroupOptimizer:
     dig_model: DiGModel
@@ -170,7 +173,7 @@ class RigidGroupOptimizer:
         renders = []
 
         # Initial guess for 3D object location.
-        est_dist_to_obj = 0.4 * self.dataset_scale  # 0.4m in nerfstudio world.
+        est_dist_to_obj = self.config.approx_dist_to_obj * self.dataset_scale  # scale to nerfstudio world.
         xs, ys, est_loc_2d = self._find_object_pixel_location(first_obs)
         ray = first_obs.frame.camera.generate_rays(0, est_loc_2d)
         est_loc_3d = ray.origins + ray.directions * est_dist_to_obj
@@ -182,7 +185,17 @@ class RigidGroupOptimizer:
         for z_rot in tqdm(np.linspace(0, np.pi * 2, n_seeds), "Trying seeds..."):
             candidate_pose = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
             candidate_pose[:, :4] = (
-                vtf.SO3.from_z_radians(torch.tensor(z_rot)).wxyz.float().cuda()
+                (
+                    tf.SO3.from_x_radians(
+                        torch.tensor(-np.pi / 2)
+                    )  # Camera in opengl, while object is in world coord.
+                    @ tf.SO3.from_x_radians(
+                        torch.tensor(self.config.altitude_down)
+                    )  # Look slightly down at the object.
+                    @ tf.SO3.from_z_radians(torch.tensor(z_rot))
+                )
+                .wxyz.float()
+                .cuda()
             )
             candidate_pose[:, 4:] = est_loc_3d - obj_centroid
             loss, final_pose, rend = self._try_opt(

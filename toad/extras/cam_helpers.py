@@ -10,6 +10,7 @@ import cv2
 import torch
 from nerfstudio.cameras.cameras import Cameras
 
+
 @dataclass
 class CameraIntr:
     name: str
@@ -18,6 +19,7 @@ class CameraIntr:
     cx: float
     cy: float
     width: int
+
 
 @dataclass
 class IPhoneIntr(CameraIntr):
@@ -29,6 +31,7 @@ class IPhoneIntr(CameraIntr):
     cy: float = 720 / 2
     width: int = 1280
 
+
 class MXIPhoneIntr(CameraIntr):
     # TODO(cmk) get iphone model.
     name: str = "mx_iphone"
@@ -38,6 +41,7 @@ class MXIPhoneIntr(CameraIntr):
     cy = 361.0
     width = 1280
 
+
 class IPhoneVerticalIntr(CameraIntr):
     name: str = "iphone_vertical"
     fy = 1137.0
@@ -46,6 +50,7 @@ class IPhoneVerticalIntr(CameraIntr):
     cx = 720 / 2
     height = 1280
     width = 720
+
 
 class GoProIntr(CameraIntr):
     name: str = "gopro"
@@ -58,10 +63,10 @@ class GoProIntr(CameraIntr):
 
 
 def get_ns_camera_at_origin(cam_intr: CameraIntr) -> Cameras:
-    """Initialize a nerfstudio camera at the origin, with known intrinsics."""
-    H = np.eye(4)
-    H[:3, :3] = vtf.SO3.from_x_radians(np.pi / 4).as_matrix()
-    cam_pose = torch.from_numpy(H).float()[None, :3, :]
+    """
+    Initialize a nerfstudio camera centered at the origin, opengl conventions (z backwards).
+    """
+    cam_pose = torch.eye(4).float()[None, :3, :]
     assert cam_pose.shape == (1, 3, 4)
 
     return Cameras(
@@ -70,8 +75,9 @@ def get_ns_camera_at_origin(cam_intr: CameraIntr) -> Cameras:
         fy=cam_intr.fy,
         cx=cam_intr.cx,
         cy=cam_intr.cy,
-        width=cam_intr.width
+        width=cam_intr.width,
     )
+
 
 def get_vid_frame(cap: cv2.VideoCapture, timestamp: float) -> np.ndarray:
     """Get frame from video at timestamp (in seconds)."""

@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
+import moviepy.editor as mpy
 
 import cv2
 import numpy as np
@@ -42,30 +43,26 @@ from toad.extras.viser_rsrd import ViserRSRD
 torch.set_float32_matmul_precision("high")
 
 
-@dataclass
-class RSRDTrackerConfig:
-    """Tracking config to run RSRD."""
-    is_obj_jointed: bool
-    dig_config_path: Path
-    video_path: Path
-    output_dir: Path
+def main(
+    is_obj_jointed: bool,
+    dig_config_path: Path,
+    video_path: Path,
+    output_dir: Path,
     camera_type: CameraIntr = IPhoneIntr()
-
-
-def main(exp: RSRDTrackerConfig):
+):
     """Track objects in video using RSRD."""
-    exp.output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load video.
-    assert exp.video_path.exists(), f"Video path {exp.video_path} does not exist."
-    video = cv2.VideoCapture(str(exp.video_path.absolute()))
+    assert video_path.exists(), f"Video path {video_path} does not exist."
+    video = cv2.VideoCapture(str(video_path.absolute()))
 
     # Load DIG model, create viewer.
-    train_config, pipeline, _, _ = eval_setup(exp.dig_config_path)
+    train_config, pipeline, _, _ = eval_setup(dig_config_path)
     viewer_lock = Lock()
     Viewer(
         ViewerConfig(default_composite_depth=False, num_rays_per_chunk=-1),
-        exp.dig_config_path.parent,
+        dig_config_path.parent,
         pipeline.datamanager.get_datapath(),
         pipeline,
         train_lock=viewer_lock,
@@ -83,9 +80,10 @@ def main(exp: RSRDTrackerConfig):
         print("No state found, starting from scratch")
 
     # Initialize tracker.
+    wp.init()  # Must be called before any other warp API call.
     optimizer_config = RigidGroupOptimizerConfig(
         atap_config=ATAPConfig(
-            loss_alpha = (1.0 if exp.is_obj_jointed else 0.1),
+            loss_alpha=(1.0 if is_obj_jointed else 0.1),
         )
     )
     optimizer = RigidGroupOptimizer(
@@ -96,10 +94,18 @@ def main(exp: RSRDTrackerConfig):
     logger.info("Initialized tracker.")
 
     # Generate + load keyframes.
-    keyframe_path = exp.output_dir / "keyframes.pt"
-    hand_path = exp.output_dir / "hands.pkl"
+    camopt_render_path = output_dir / "camopt_render.mp4"
+    keyframe_path = output_dir / "keyframes.pt"
+    hand_path = output_dir / "hands.pkl"
     if not keyframe_path.exists():
-        generate_keyframes(optimizer, video, exp.camera_type, keyframe_path, hand_path)
+        generate_keyframes(
+            optimizer,
+            video,
+            camera_type,
+            camopt_render_path,
+            keyframe_path,
+            hand_path
+        )
 
     optimizer.load_deltas(keyframe_path)
     with hand_path.open("rb") as f:
@@ -123,11 +129,9 @@ def main(exp: RSRDTrackerConfig):
 
         viser_rsrd.update_cfg(obj_delta, part_deltas)
 
-        # TODO(cmk) Remvoe magic np.pi/4 here -- related to `get_ns_camera_at_origin`.
-        server.scene.add_frame("/cam", wxyz=vtf.SO3.from_x_radians(np.pi / 4).wxyz)
         if hands.get(tstep, None) is not None:
             hands_handle = server.scene.add_mesh_trimesh(
-                "/cam/hands", sum(hands[tstep], trimesh.Trimesh())
+                "/hands", sum(hands[tstep], trimesh.Trimesh())
             )
         elif hands_handle is not None:
             hands_handle.visible = False
@@ -140,6 +144,7 @@ def generate_keyframes(
     optimizer: RigidGroupOptimizer,
     motion_clip: cv2.VideoCapture,
     camera_type: CameraIntr,
+    camopt_render_path: Path,
     keyframe_path: Path,
     hand_path: Path,
 ):
@@ -155,10 +160,8 @@ def generate_keyframes(
     renders = optimizer.initialize_obj_pose(obs, render=True, niter=100, n_seeds=5)
 
     # Save the frames.
-    import moviepy.editor as mpy
-
     out_clip = mpy.ImageSequenceClip(renders, fps=30)
-    out_clip.write_videofile(str("test_camopt.mp4"))
+    out_clip.write_videofile(str(camopt_render_path))
 
     # Add each frame, optimize them separately.
     for frame_id in tqdm.trange(0, num_frames):
@@ -205,6 +208,4 @@ def generate_keyframes(
 
 
 if __name__ == "__main__":
-    # Must be called before any other warp API call.
-    wp.init()
     tyro.cli(main)
