@@ -165,7 +165,7 @@ class RigidGroupOptimizer:
         - `self.obj_delta`
         """
         assert not self.is_initialized, "Can only initialize once"
-        self.sequence.add_obs(first_obs)
+        self.sequence.append(first_obs)
 
         renders = []
 
@@ -260,7 +260,7 @@ class RigidGroupOptimizer:
             with tape:
                 this_obj_delta = self.obj_delta[idx].view(1, 7)
                 this_part_deltas = self.part_deltas[idx]
-                observation = self.sequence.get_obs(idx)
+                observation = self.sequence[idx]
                 frame = (
                     observation.frame
                     if not self.config.use_roi
@@ -456,18 +456,18 @@ class RigidGroupOptimizer:
         if frame.has_metric_depth:
             physical_depth = outputs["depth"] / self.dataset_scale
 
-            valids = object_mask & (~frame.depth.isnan())
+            valids = object_mask & (~frame.monodepth.isnan())
             if frame.hand_mask is not None:
                 valids = valids & frame.hand_mask.unsqueeze(-1)
 
-            pix_loss = (physical_depth - frame.depth) ** 2
+            pix_loss = (physical_depth - frame.monodepth) ** 2
             pix_loss = pix_loss[
                 valids & (pix_loss < self.config.depth_ignore_threshold**2)
             ]
             return pix_loss.mean()
 
         # Otherwise, we're using disparity.
-        frame_depth = 1 / frame.depth # convert disparity to depth
+        frame_depth = 1 / frame.monodepth # convert disparity to depth
         # erode the mask by like 10 pixels
         object_mask = object_mask & (~frame_depth.isnan())
         object_mask = kornia.morphology.erosion(
@@ -564,7 +564,7 @@ class RigidGroupOptimizer:
 
         if self.config.use_roi:
             obs.compute_and_set_roi(self)
-        self.sequence.add_obs(obs)
+        self.sequence.append(obs)
 
         # add another timestep of pose to the part and object poses
         self.obj_delta = torch.nn.Parameter(

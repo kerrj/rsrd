@@ -59,8 +59,8 @@ def mnn_matcher(feat_a, feat_b):
 def crop_camera(camera: Cameras, xmin, xmax, ymin, ymax):
     height = torch.tensor(ymax - ymin, device="cuda").view(1, 1).int()
     width = torch.tensor(xmax - xmin, device="cuda").view(1, 1).int()
-    cx = torch.tensor(camera.cx.clone().detach() - xmin, device="cuda").view(1, 1)
-    cy = torch.tensor(camera.cy.clone().detach() - ymin, device="cuda").view(1, 1)
+    cx = (camera.cx - xmin).view(1, 1)
+    cy = (camera.cy - ymin).view(1, 1)
     fx = camera.fx.clone()
     fy = camera.fy.clone()
     return Cameras(camera.camera_to_worlds.clone(), fx, fy, cx, cy, width, height)

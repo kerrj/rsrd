@@ -1,11 +1,10 @@
 import trimesh
 import torch
-from typing import Optional, Callable, TYPE_CHECKING
+from typing import Optional, Callable, Iterable, Iterator, TYPE_CHECKING
 from nerfstudio.cameras.cameras import Cameras
 from torchvision.transforms.functional import resize
 from copy import deepcopy
 
-from toad.util.common import Future
 from toad.util.common import crop_camera
 from toad.util.frame_detectors import Hand2DDetector, Hand3DDetector, MonoDepthEstimator
 
@@ -18,21 +17,30 @@ class Frame:
     rgb: torch.Tensor
     has_metric_depth: bool
     metric_depth: Optional[torch.Tensor]
-    _depth: Future[torch.Tensor]
-    _dino_feats: Future[torch.Tensor]
-    _hand_mask: Future[torch.Tensor]
+    _depth: Optional[torch.Tensor]
+    _dino_feats: Optional[torch.Tensor]
+    _hand_mask: Optional[torch.Tensor]
 
     @property
-    def depth(self):
-        return self._depth.retrieve().cuda()
+    def monodepth(self):
+        """Monodepth, using Depth-Anythingv2."""
+        if self._depth is None:
+            self._depth = self._get_depth()
+        return self._depth.cuda()
 
     @property
     def dino_feats(self):
-        return self._dino_feats.retrieve().cuda()
+        """Dino feature."""
+        if self._dino_feats is None:
+            self._dino_feats = self._get_dino()
+        return self._dino_feats.cuda()
 
     @property
     def hand_mask(self):
-        return self._hand_mask.retrieve().cuda()
+        """2D hand masks, based on Mask2Former."""
+        if self._hand_mask is None:
+            self._hand_mask = self._get_hand_mask()
+        return self._hand_mask.cuda()
 
     def __init__(
         self,
@@ -51,9 +59,9 @@ class Frame:
         self.has_metric_depth = metric_depth is not None
         self.dino_fn = dino_fn
 
-        self._depth = Future(self._get_depth)
-        self._dino_feats = Future(self._get_dino)
-        self._hand_mask = Future(self._get_hand_mask)
+        self._depth = None
+        self._dino_feats = None
+        self._hand_mask = None
 
     @torch.no_grad()
     def _get_depth(self) -> torch.Tensor:
@@ -102,7 +110,7 @@ class Frame:
         left, right = Hand3DDetector.detect_hands(self.rgb, focal)
         hands = Hand3DDetector.get_aligned_hands_3d(
             [left, right],
-            self.depth,
+            self.monodepth,
             object_mask,
             rendered_scaled_depth,
             focal,
@@ -112,7 +120,8 @@ class Frame:
 
 class PosedObservation:
     """
-    Class for computing relevant data products for a frame and storing them
+    Class for computing relevant data products for a frame and storing them.
+    Useful for tracking the originl frame and the ROI frame.
     """
 
     rasterize_resolution: int = 490
@@ -212,15 +221,23 @@ class PosedObservation:
         self.set_roi(*roi)
 
 
-class VideoSequence:
+class VideoSequence(Iterable[PosedObservation]):
+    _obs: list[PosedObservation]
+
     def __init__(self):
-        self.obs = []
+        self._obs = []
 
-    def add_obs(self, frame: PosedObservation, idx: int = -1):
-        self.obs.append(frame)
-
-    def get_obs(self, idx: int) -> PosedObservation:
-        return self.obs[idx]
-
+    def __iter__(self) -> Iterator[PosedObservation]:
+        return iter(self._obs)
+    
     def __len__(self) -> int:
-        return len(self.obs)
+        return len(self._obs)
+    
+    def __getitem__(self, idx) -> PosedObservation:
+        return self._obs[idx]
+    
+    def append(self, obs: PosedObservation):
+        self._obs.append(obs)
+
+    def extend(self, obs: Iterable[PosedObservation]):
+        self._obs.extend(obs)

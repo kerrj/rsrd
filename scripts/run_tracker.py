@@ -30,30 +30,32 @@ from toad.optimization.rigid_group_optimizer import (
     RigidGroupOptimizer,
     RigidGroupOptimizerConfig,
 )
-from toad.extras.cameras import CameraIntr, IPhoneIntr, get_ns_camera_at_origin, get_vid_frame
+from toad.extras.cameras import (
+    CameraIntr,
+    IPhoneIntr,
+    get_ns_camera_at_origin,
+    get_vid_frame,
+)
 from toad.extras.viser_rsrd import ViserRSRD
 
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision("high")
 
 
 @dataclass
 class RSRDTrackerConfig:
     """Tracking config to run RSRD."""
+
     dig_config_path: Path
     video_path: Path
-    base_output_folder: Path
+    output_dir: Path
 
     camera_type: CameraIntr = IPhoneIntr()
     optimizer_config: RigidGroupOptimizerConfig = RigidGroupOptimizerConfig()
 
-    detect_hands: bool = False
-    save_viser: bool = False
-    terminate_on_done: bool = False
-
 
 def main(exp: RSRDTrackerConfig):
     """Track objects in video using RSRD."""
-    exp.base_output_folder.mkdir(parents=True, exist_ok=True)
+    exp.output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load video.
     assert exp.video_path.exists(), f"Video path {exp.video_path} does not exist."
@@ -62,7 +64,7 @@ def main(exp: RSRDTrackerConfig):
     # Load DIG model, create viewer.
     train_config, pipeline, _, _ = eval_setup(exp.dig_config_path)
     viewer_lock = Lock()
-    viewer = Viewer(
+    Viewer(
         ViewerConfig(default_composite_depth=False, num_rays_per_chunk=-1),
         exp.dig_config_path.parent,
         pipeline.datamanager.get_datapath(),
@@ -70,7 +72,9 @@ def main(exp: RSRDTrackerConfig):
         train_lock=viewer_lock,
     )
     # Need to set up the writer to track number of rays, otherwise the viewer will not calculate the resolution correctly.
-    writer.setup_local_writer(train_config.logging, max_iter=train_config.max_num_iterations)
+    writer.setup_local_writer(
+        train_config.logging, max_iter=train_config.max_num_iterations
+    )
 
     # TODO(cmk) add `reset_colors` to GARField main branch.
     try:
@@ -87,21 +91,15 @@ def main(exp: RSRDTrackerConfig):
     )
     logger.info("Initialized tracker.")
 
-    # Load (and generate if necessary) keyframes.
-    keyframe_path = exp.base_output_folder / "keyframes.pt"
-    hand_path = exp.base_output_folder / "hands.pkl"
+    # Generate + load keyframes.
+    keyframe_path = exp.output_dir / "keyframes.pt"
+    hand_path = exp.output_dir / "hands.pkl"
     if not keyframe_path.exists():
         generate_keyframes(optimizer, video, exp.camera_type, keyframe_path, hand_path)
 
     optimizer.load_deltas(keyframe_path)
     with hand_path.open("rb") as f:
-        hands = cast(
-            dict[int, list[trimesh.Trimesh]],
-            pickle.load(f)
-        )
-    for frame_id, hand_list in hands.items():
-        for hand in hand_list:
-            hand.vertices *= optimizer.dataset_scale
+        hands = cast(dict[int, list[trimesh.Trimesh]], pickle.load(f))
 
     server = viser.ViserServer()
     viser_rsrd = ViserRSRD(server, optimizer, base_frame_name="/object")
@@ -122,11 +120,10 @@ def main(exp: RSRDTrackerConfig):
         viser_rsrd.update_cfg(obj_delta, part_deltas)
 
         # TODO(cmk) Remvoe magic np.pi/4 here -- related to `get_ns_camera_at_origin`.
-        server.scene.add_frame("/cam", wxyz=vtf.SO3.from_x_radians(np.pi/4).wxyz)
-        server.scene.add_frame("/cam/foo", wxyz=vtf.SO3.from_x_radians(np.pi).wxyz)
+        server.scene.add_frame("/cam", wxyz=vtf.SO3.from_x_radians(np.pi / 4).wxyz)
         if hands.get(tstep, None) is not None:
             hands_handle = server.scene.add_mesh_trimesh(
-                "/cam/foo/hands", sum(hands[tstep], trimesh.Trimesh())
+                "/cam/hands", sum(hands[tstep], trimesh.Trimesh())
             )
         elif hands_handle is not None:
             hands_handle.visible = False
@@ -142,7 +139,7 @@ def generate_keyframes(
     keyframe_path: Path,
     hand_path: Path,
 ):
-    """Get part poses for each frame in the video, ad save the keyframes to a file. """
+    """Get part poses for each frame in the video, ad save the keyframes to a file."""
     camera = get_ns_camera_at_origin(camera_type)
     num_frames = int(motion_clip.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = motion_clip.get(cv2.CAP_PROP_FPS)
@@ -155,6 +152,7 @@ def generate_keyframes(
 
     # Save the frames.
     import moviepy.editor as mpy
+
     out_clip = mpy.ImageSequenceClip(renders, fps=30)
     out_clip.write_videofile(str("test_camopt.mp4"))
 
@@ -171,16 +169,22 @@ def generate_keyframes(
     for frame_id in tqdm.trange(0, num_frames, desc="Detecting hands"):
         with torch.no_grad():
             optimizer.apply_keyframe(frame_id)
-            curr_obs = optimizer.sequence.obs[frame_id]
+            curr_obs = optimizer.sequence[frame_id]
             outputs = cast(
                 dict[str, torch.Tensor],
-                optimizer.dig_model.get_outputs(curr_obs.frame.camera)
+                optimizer.dig_model.get_outputs(curr_obs.frame.camera),
             )
-            rendered_scaled_depth = outputs['depth'] / optimizer.dataset_scale
-            object_mask = outputs['accumulation'] > optimizer.config.mask_threshold
-            
+            rendered_scaled_depth = outputs["depth"] / optimizer.dataset_scale
+            object_mask = outputs["accumulation"] > optimizer.config.mask_threshold
+
             # Hands in camera frame.
             hands_3d = curr_obs.frame.get_hand_3d(object_mask, rendered_scaled_depth)
+
+            for hand in hands_3d:
+                hand.vertices *= optimizer.dataset_scale  # Re-apply nerfstudio scaling.
+                hand.apply_transform(
+                    vtf.SE3.from_rotation(vtf.SO3.from_x_radians(np.pi)).as_matrix()
+                )  # OpenCV -> OpenGL (ns).
 
             if len(hands_3d) > 0:
                 hands_dict[frame_id] = hands_3d
@@ -194,6 +198,7 @@ def generate_keyframes(
     # Save the hands.
     with hand_path.open("wb") as f:
         pickle.dump(hands_dict, f)
+
 
 if __name__ == "__main__":
     # Must be called before any other warp API call.
