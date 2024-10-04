@@ -30,7 +30,8 @@ from toad.optimization.rigid_group_optimizer import (
     RigidGroupOptimizer,
     RigidGroupOptimizerConfig,
 )
-from toad.extras.cameras import (
+from toad.optimization.atap_loss import ATAPConfig
+from toad.extras.cam_helpers import (
     CameraIntr,
     IPhoneIntr,
     get_ns_camera_at_origin,
@@ -44,13 +45,11 @@ torch.set_float32_matmul_precision("high")
 @dataclass
 class RSRDTrackerConfig:
     """Tracking config to run RSRD."""
-
+    is_obj_jointed: bool
     dig_config_path: Path
     video_path: Path
     output_dir: Path
-
     camera_type: CameraIntr = IPhoneIntr()
-    optimizer_config: RigidGroupOptimizerConfig = RigidGroupOptimizerConfig()
 
 
 def main(exp: RSRDTrackerConfig):
@@ -84,8 +83,13 @@ def main(exp: RSRDTrackerConfig):
         print("No state found, starting from scratch")
 
     # Initialize tracker.
+    optimizer_config = RigidGroupOptimizerConfig(
+        atap_config=ATAPConfig(
+            loss_alpha = (1.0 if exp.is_obj_jointed else 0.1),
+        )
+    )
     optimizer = RigidGroupOptimizer(
-        exp.optimizer_config,
+        optimizer_config,
         pipeline,
         render_lock=viewer_lock,
     )

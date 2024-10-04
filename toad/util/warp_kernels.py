@@ -118,3 +118,32 @@ def traj_smoothness_loss_warp(
         local_loss += q_dist_2 * rotation_lambda
 
     loss[t, n] = local_loss
+
+
+# https://openaccess.thecvf.com/content_CVPR_2019/papers/Barron_A_General_and_Adaptive_Robust_Loss_Function_CVPR_2019_paper.pdf
+@wp.func
+def jon_loss(x: float, alpha: float, c: float):
+    pow_part = ((x / c) ** 2.0) / wp.abs(alpha - 2.0) + 1.0
+    return (wp.abs(alpha - 2.0) / alpha) * (wp.pow(pow_part, alpha / 2.0) - 1.0)
+
+
+@wp.kernel
+def atap_loss_warp(
+    cur_means: wp.array(dtype=wp.vec3),
+    dists: wp.array(dtype=float),
+    ids: wp.array(dtype=int),
+    match_ids: wp.array(dtype=int),
+    group_ids1: wp.array(dtype=int),
+    group_ids2: wp.array(dtype=int),
+    connectivity_weights: wp.array(dtype=float, ndim=2),
+    loss: wp.array(dtype=float),
+    alpha: float,
+):
+    tid = wp.tid()
+    id1 = ids[tid]
+    id2 = match_ids[tid]
+    gid1 = group_ids1[tid]
+    gid2 = group_ids2[tid]
+    con_weight = connectivity_weights[gid1, gid2]
+    curdist = wp.length(cur_means[id1] - cur_means[id2])
+    loss[tid] = jon_loss(curdist - dists[tid], alpha, 0.001) * con_weight * 0.001
