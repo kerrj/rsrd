@@ -34,6 +34,7 @@ from toad.util.common import identity_7vec, extrapolate_poses, mnn_matcher
 @dataclass
 class RigidGroupOptimizerConfig:
     use_depth: bool = True
+    use_rgb: bool = True
     rank_loss_mult: float = 0.2
     rank_loss_erode: int = 3
     depth_ignore_threshold: float = 0.1  # in meters
@@ -284,7 +285,7 @@ class RigidGroupOptimizer:
                     this_obj_delta,
                     this_part_deltas,
                     self.config.use_depth,
-                    False,
+                    self.config.use_rgb,
                     self.config.atap_config.use_atap,
                     self.config.do_obj_optim,
                 )
