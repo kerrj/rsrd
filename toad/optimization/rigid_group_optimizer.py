@@ -1,9 +1,12 @@
+from copy import deepcopy
+import json
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import List, Optional, Tuple, cast, Union
+from typing import Any, List, Optional, Tuple, cast, Union
 
+from hamer_helper import HandOutputsWrtCamera
 import kornia
 import numpy as np
 import torch
@@ -71,6 +74,10 @@ class RigidGroupOptimizer:
     is_initialized: bool
     obj_delta: Float[torch.nn.Parameter, "time 7"]  # noqa: F722
     part_deltas: Float[torch.nn.Parameter, "time group 7"]  # noqa: F722
+
+    hands_info: Optional[
+        dict[int, tuple[HandOutputsWrtCamera | None, HandOutputsWrtCamera | None]]
+    ] = None
 
     def __init__(
         self,
@@ -546,23 +553,85 @@ class RigidGroupOptimizer:
             self.part_deltas[i].view(-1, 7)
         )
 
-    def load_deltas(self, path: Path):
+    def load_tracks(self, path: Path):
         """
         Loads the trajectory from a file. Sets keyframes and hand_frames.
         """
-        data = torch.load(path)
-        self.part_deltas = data['part_deltas'].cuda()
-        self.obj_delta = data['obj_delta'].cuda()
+        data = json.loads(path.read_text())
+        self.part_deltas = torch.nn.Parameter(torch.tensor(data["part_deltas"]).cuda())
+        self.obj_delta = torch.nn.Parameter(torch.tensor(data["obj_delta"]).cuda())
         self.is_initialized = True
+        
+        # Load hand info, if available.
+        if "hands" in data:
+            self.hands_info = {}
+            for tstep, (hand_l_dict, hand_r_dict) in data["hands"].items():
+                # Load hands from json files.
+                # Left hand:
+                if hand_l_dict is not None:
+                    # Turn all values into np.ndarray.
+                    for k, v in hand_l_dict.items():
+                        hand_l_dict[k] = np.array(v)
+                    hand_l = HandOutputsWrtCamera(**hand_l_dict)
+                else:
+                    hand_l = None
 
-    def save_deltas(self, path: Path):
+                # Right hand:
+                if hand_r_dict is not None:
+                    for k, v in hand_l_dict.items():
+                        hand_l_dict[k] = np.array(v)
+                    hand_r = HandOutputsWrtCamera(**hand_r_dict)
+                else:
+                    hand_r = None
+
+                self.hands_info[int(tstep)] = (hand_l, hand_r)
+        else:
+            self.hands_info = None
+
+    def save_tracks(
+        self,
+        path: Path,
+        hands: Optional[
+            dict[int, tuple[HandOutputsWrtCamera | None, HandOutputsWrtCamera | None]]
+        ] = None,
+    ):
         """
         Saves the trajectory to a file
         """
-        torch.save({
-            "part_deltas": self.part_deltas,
-            "obj_delta": self.obj_delta,
-        }, path)
+        save_dict: dict[str, Any] = {
+            "part_deltas": self.part_deltas.detach().cpu().tolist(),
+            "obj_delta": self.obj_delta.detach().cpu().tolist(),
+        }
+
+        # Save hand info, if available.
+        if self.hands_info is not None and hands is None:
+            hands = self.hands_info
+        if hands is not None:
+            save_dict["hands"] = {}
+            for tstep, (hand_l, hand_r) in hands.items():
+                # Make hands into dicts that can be written as json files.
+                # Left hand:
+                if hand_l is not None:
+                    hand_l_as_dict = deepcopy(hand_l)
+                    for k, v in hand_l_as_dict.items():
+                        assert isinstance(v, np.ndarray)
+                        hand_l_as_dict[k] = v.tolist()
+                else:
+                    hand_l_as_dict = None
+
+                # Right hand:
+                if hand_r is not None:
+                    hand_r_as_dict = deepcopy(hand_r)
+                    for k, v in hand_r_as_dict.items():
+                        assert isinstance(v, np.ndarray)
+                        hand_r_as_dict[k] = v.tolist()
+                else:
+                    hand_r_as_dict = None
+                
+                save_dict["hands"][tstep] = (hand_l_as_dict, hand_r_as_dict)
+
+        path.write_text(json.dumps(save_dict))
+
 
     def reset_transforms(self):
         with torch.no_grad():

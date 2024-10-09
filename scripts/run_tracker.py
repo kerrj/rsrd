@@ -2,11 +2,9 @@
 Script for running the tracker.
 """
 
-import pickle
 import trimesh
 from typing import cast
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 import moviepy.editor as mpy
@@ -18,7 +16,6 @@ import tqdm
 import warp as wp
 
 import viser
-import viser.transforms as vtf
 import tyro
 from loguru import logger
 
@@ -48,7 +45,8 @@ def main(
     dig_config_path: Path,
     video_path: Path,
     output_dir: Path,
-    camera_type: CameraIntr = IPhoneIntr()
+    camera_type: CameraIntr = IPhoneIntr(),
+    save_hand: bool = True,
 ):
     """Track objects in video using RSRD."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -95,28 +93,27 @@ def main(
 
     # Generate + load keyframes.
     camopt_render_path = output_dir / "camopt_render.mp4"
-    keyframe_path = output_dir / "keyframes.pt"
-    hand_path = output_dir / "hands.pkl"
-    if not keyframe_path.exists():
-        generate_keyframes(
+    track_data_path = output_dir / "keyframes.txt"
+    if not track_data_path.exists():
+        track_and_save_motion(
             optimizer,
             video,
             camera_type,
             camopt_render_path,
-            keyframe_path,
-            hand_path
+            track_data_path,
+            save_hand,
         )
 
-    optimizer.load_deltas(keyframe_path)
-    with hand_path.open("rb") as f:
-        hands = cast(dict[int, list[trimesh.Trimesh]], pickle.load(f))
+    optimizer.load_tracks(track_data_path)
+    hands = optimizer.hands_info
+    assert hands is not None
 
     server = viser.ViserServer()
     viser_rsrd = ViserRSRD(server, optimizer, base_frame_name="/object")
 
     timesteps = len(optimizer.obj_delta)
     track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
-    play_checkbox = server.gui.add_checkbox("play", False)
+    play_checkbox = server.gui.add_checkbox("play", True)
     hands_handle = None
 
     while True:
@@ -130,8 +127,28 @@ def main(
         viser_rsrd.update_cfg(obj_delta, part_deltas)
 
         if hands.get(tstep, None) is not None:
+            left_hand, right_hand = hands[tstep]
+            hand_meshes = []
+            if left_hand is not None:
+                for idx in range(left_hand["verts"].shape[0]):
+                    hand_meshes.append(
+                        trimesh.Trimesh(
+                            vertices=left_hand["verts"][idx],
+                            faces=left_hand["faces"].astype(np.int32),
+                        )
+                    )
+
+            if right_hand is not None:
+                for idx in range(right_hand["verts"].shape[0]):
+                    hand_meshes.append(
+                        trimesh.Trimesh(
+                            vertices=right_hand["verts"][idx],
+                            faces=right_hand["faces"].astype(np.int32),
+                        )
+                    )
+
             hands_handle = server.scene.add_mesh_trimesh(
-                "/hands", sum(hands[tstep], trimesh.Trimesh())
+                "/hands", sum(hand_meshes, trimesh.Trimesh())
             )
         elif hands_handle is not None:
             hands_handle.visible = False
@@ -140,13 +157,13 @@ def main(
 
 
 # But this should _really_ be in the rigid optimizer.
-def generate_keyframes(
+def track_and_save_motion(
     optimizer: RigidGroupOptimizer,
     motion_clip: cv2.VideoCapture,
     camera_type: CameraIntr,
     camopt_render_path: Path,
-    keyframe_path: Path,
-    hand_path: Path,
+    track_data_path: Path,
+    save_hand: bool = False,
 ):
     """Get part poses for each frame in the video, ad save the keyframes to a file."""
     camera = get_ns_camera_at_origin(camera_type)
@@ -173,38 +190,28 @@ def generate_keyframes(
 
     # Get 3D hands.
     hands_dict = {}
-    for frame_id in tqdm.trange(0, num_frames, desc="Detecting hands"):
-        with torch.no_grad():
-            optimizer.apply_keyframe(frame_id)
-            curr_obs = optimizer.sequence[frame_id]
-            outputs = cast(
-                dict[str, torch.Tensor],
-                optimizer.dig_model.get_outputs(curr_obs.frame.camera),
-            )
-            rendered_scaled_depth = outputs["depth"] / optimizer.dataset_scale
-            object_mask = outputs["accumulation"] > optimizer.config.mask_threshold
+    if save_hand:
+        for frame_id in tqdm.trange(0, num_frames, desc="Detecting hands"):
+            with torch.no_grad():
+                optimizer.apply_keyframe(frame_id)
+                curr_obs = optimizer.sequence[frame_id]
+                outputs = cast(
+                    dict[str, torch.Tensor],
+                    optimizer.dig_model.get_outputs(curr_obs.frame.camera),
+                )
+                object_mask = outputs["accumulation"] > optimizer.config.mask_threshold
 
-            # Hands in camera frame.
-            hands_3d = curr_obs.frame.get_hand_3d(object_mask, rendered_scaled_depth)
-
-            for hand in hands_3d:
-                hand.vertices *= optimizer.dataset_scale  # Re-apply nerfstudio scaling.
-                hand.apply_transform(
-                    vtf.SE3.from_rotation(vtf.SO3.from_x_radians(np.pi)).as_matrix()
-                )  # OpenCV -> OpenGL (ns).
-
-            if len(hands_3d) > 0:
-                hands_dict[frame_id] = hands_3d
+                # Hands in camera frame.
+                left_hand, right_hand = curr_obs.frame.get_hand_3d(
+                    object_mask, outputs["depth"], optimizer.dataset_scale
+                )
+                hands_dict[frame_id] = (left_hand, right_hand)
 
     # Smooth all frames, together.
     logger.warning("Skipping all-frame smoothing optimization.")
 
     # Save part trajectories.
-    optimizer.save_deltas(keyframe_path)
-
-    # Save the hands.
-    with hand_path.open("wb") as f:
-        pickle.dump(hands_dict, f)
+    optimizer.save_tracks(track_data_path, hands_dict)
 
 
 if __name__ == "__main__":

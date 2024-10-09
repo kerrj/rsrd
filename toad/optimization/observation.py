@@ -1,4 +1,4 @@
-import trimesh
+import numpy as np
 import torch
 from typing import Optional, Callable, Iterable, Iterator, TYPE_CHECKING
 from nerfstudio.cameras.cameras import Cameras
@@ -7,10 +7,11 @@ from copy import deepcopy
 
 from toad.util.common import crop_camera
 from toad.util.frame_detectors import Hand2DDetector, Hand3DDetector, MonoDepthEstimator
+from toad.transforms import SO3
+from hamer_helper import HandOutputsWrtCamera
 
 if TYPE_CHECKING:
     from toad.optimization.rigid_group_optimizer import RigidGroupOptimizer
-
 
 class Frame:
     camera: Cameras
@@ -102,21 +103,55 @@ class Frame:
         return hand_mask.cpu().pin_memory()
 
     @torch.no_grad()
-    def get_hand_3d(self, object_mask: torch.Tensor, rendered_scaled_depth: torch.Tensor) -> list[trimesh.Trimesh]:
+    def get_hand_3d(
+        self, object_mask: torch.Tensor, rendered_depth: torch.Tensor, dataset_scale: float
+    ) -> tuple[HandOutputsWrtCamera | None, HandOutputsWrtCamera | None]:
+        """
+        Get the 3D hand meshes, as well as their right/left status.
+        """
+        # Undo nerfstudio scaling.
+        rendered_scaled_depth = rendered_depth / dataset_scale
+
         focal = self.camera.fx.item() * (
             max(self.rgb.shape[0], self.rgb.shape[1])
             / PosedObservation.rasterize_resolution
         )
         left, right = Hand3DDetector.detect_hands(self.rgb, focal)
-        hands = Hand3DDetector.get_aligned_hands_3d(
-            [left, right],
+        left_hands = Hand3DDetector.get_aligned_hands_3d(
+            left,
             self.monodepth,
             object_mask,
             rendered_scaled_depth,
             focal,
         )
-        return hands
+        right_hands = Hand3DDetector.get_aligned_hands_3d(
+            right,
+            self.monodepth,
+            object_mask,
+            rendered_scaled_depth,
+            focal,
+        )
 
+        for hand in [left_hands, right_hands]:
+            if hand is None:
+                continue
+
+            # Re-apply nerfstudio scaling. 
+            hand["verts"] *= dataset_scale 
+            hand["keypoints_3d"] *= dataset_scale
+
+            # OpenCV -> OpenGL (ns).
+            rotmat = (
+                SO3.from_x_radians(torch.Tensor([torch.pi]))
+                .as_matrix()
+                .squeeze()
+                .numpy()
+            )
+
+            for key in ["verts", "keypoints_3d", "mano_hand_global_orient", "mano_hand_pose"]:
+                hand[key] = np.einsum("ij,...j->...i", rotmat, hand[key])
+
+        return (left_hands, right_hands)
 
 class PosedObservation:
     """

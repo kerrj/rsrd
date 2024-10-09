@@ -1,6 +1,6 @@
+from copy import deepcopy
 import torch
-from torchvision.transforms.functional import resize
-from typing import Union, cast, Iterable
+from typing import Union, cast
 import numpy as np
 from PIL import Image
 from transformers import (
@@ -8,7 +8,6 @@ from transformers import (
     Mask2FormerForUniversalSegmentation,
     AutoModelForDepthEstimation,
 )
-import trimesh
 
 from hamer_helper import HamerHelper, HandOutputsWrtCamera
 from toad.util.common import Future
@@ -66,41 +65,49 @@ class Hand3DDetector:
     @classmethod
     def get_aligned_hands_3d(
         cls, 
-        hand_outputs: Iterable[HandOutputsWrtCamera | None], 
+        hand_outputs: HandOutputsWrtCamera | None,  
         monodepth: torch.Tensor, 
         object_mask: torch.Tensor, 
         rendered_scaled_depth: torch.Tensor, 
         focal_length: float
-    ) -> list[trimesh.Trimesh]:
+    ) -> HandOutputsWrtCamera | None:
+        if hand_outputs is None:
+            return None
+
+        num_hands = hand_outputs["verts"].shape[0]
+        if num_hands == 0:
+            return hand_outputs
+
         # Get shift/scale for matching monodepth to object depth.
         monodepth_scale = rendered_scaled_depth[object_mask].std() / monodepth[object_mask].std()
         monodepth_aligned = (
             monodepth - monodepth[object_mask].mean()
         ) * monodepth_scale + rendered_scaled_depth[object_mask].mean()
 
-        hands = []
-        for hand_output in hand_outputs:
-            if hand_output is not None:
-                num_hands = hand_output["verts"].shape[0]
-                for hand_idx in range(num_hands):
-                    hands.append(
-                        cls._get_aligned_hand_3d(
-                            hand_output,
-                            hand_idx,
-                            monodepth_aligned,
-                            focal_length,
-                        )
-                    )
-        return hands
+        num_hands = hand_outputs["verts"].shape[0]
+        _hand_outputs = deepcopy(hand_outputs)
+        for hand_idx in range(num_hands):
+            # hands.append(
+            hand_shift = cls._get_aligned_hand_3d_shift(
+                hand_outputs,
+                hand_idx,
+                monodepth_aligned,
+                focal_length,
+            )
+            hand_shift_vec = -np.array([0, 0, hand_shift])
+            _hand_outputs["verts"][hand_idx] = hand_outputs["verts"][hand_idx] + hand_shift_vec
+            _hand_outputs["keypoints_3d"][hand_idx] = hand_outputs["keypoints_3d"][hand_idx] + hand_shift_vec
+
+        return _hand_outputs
     
     @classmethod
-    def _get_aligned_hand_3d(
+    def _get_aligned_hand_3d_shift(
         cls,
         hand_output: HandOutputsWrtCamera,
         hand_idx: int,
         monodepth_aligned: torch.Tensor,
         focal_length: float,
-    ) -> trimesh.Trimesh:
+    ) -> float:
         # Get the hand depth.
         rgb, hand_depth, hand_mask = cast(
             HamerHelper, cls.hamer_helper.retrieve()
@@ -116,11 +123,7 @@ class Hand3DDetector:
 
         # Get shift (no scale!) to match hand depth to monodepth.
         hand_shift = (hand_depth[hand_mask].mean() - monodepth_aligned[hand_mask].mean()).item()
-        hand_mesh = trimesh.Trimesh(
-            vertices=hand_output["verts"][hand_idx] - np.array([0, 0, hand_shift]),
-            faces=hand_output["faces"],
-        )
-        return hand_mesh
+        return hand_shift
 
 
 class MonoDepthEstimator:
