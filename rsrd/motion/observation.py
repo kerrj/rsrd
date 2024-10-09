@@ -5,13 +5,13 @@ from nerfstudio.cameras.cameras import Cameras
 from torchvision.transforms.functional import resize
 from copy import deepcopy
 
-from toad.util.common import crop_camera
-from toad.util.frame_detectors import Hand2DDetector, Hand3DDetector, MonoDepthEstimator
-from toad.transforms import SO3
+from rsrd.util.common import crop_camera
+from rsrd.util.frame_detectors import Hand2DDetector, Hand3DDetector, MonoDepthEstimator
+from rsrd.transforms import SO3
 from hamer_helper import HandOutputsWrtCamera
 
 if TYPE_CHECKING:
-    from toad.optimization.rigid_group_optimizer import RigidGroupOptimizer
+    from rsrd.motion.motion_optimizer import RigidGroupOptimizer
 
 class Frame:
     camera: Cameras

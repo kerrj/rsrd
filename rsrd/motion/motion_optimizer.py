@@ -28,11 +28,11 @@ from nerfstudio.pipelines.base_pipeline import Pipeline
 from lerf.dig import DiGModel
 from lerf.data.utils.dino_dataloader import DinoDataloader
 
-import toad.transforms as tf
-from toad.optimization.atap_loss import ATAPLoss, ATAPConfig
-from toad.optimization.observation import PosedObservation, VideoSequence, Frame
-from toad.util.warp_kernels import apply_to_model_warp
-from toad.util.common import identity_7vec, extrapolate_poses, mnn_matcher
+import rsrd.transforms as tf
+from rsrd.motion.atap_loss import ATAPLoss, ATAPConfig
+from rsrd.motion.observation import PosedObservation, VideoSequence, Frame
+from rsrd.util.warp_kernels import apply_to_model_warp
+from rsrd.util.common import identity_7vec, extrapolate_poses, mnn_matcher
 
 @dataclass
 class RigidGroupOptimizerConfig:
@@ -578,8 +578,8 @@ class RigidGroupOptimizer:
 
                 # Right hand:
                 if hand_r_dict is not None:
-                    for k, v in hand_l_dict.items():
-                        hand_l_dict[k] = np.array(v)
+                    for k, v in hand_r_dict.items():
+                        hand_r_dict[k] = np.array(v)
                     hand_r = HandOutputsWrtCamera(**hand_r_dict)
                 else:
                     hand_r = None

@@ -6,7 +6,7 @@ import warp as wp
 from dataclasses import dataclass
 from loguru import logger
 
-from toad.util.warp_kernels import atap_loss_warp
+from rsrd.util.warp_kernels import atap_loss_warp
 
 
 @dataclass

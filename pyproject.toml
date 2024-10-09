@@ -1,10 +1,11 @@
 [project]
-name = "toad"
+name = "rsrd"
 version = "0.0.1"
 
 dependencies=[
-    "viser"
+    "nerfstudio",
+    "hamer",
 ]
 
 [tool.setuptools.packages.find]
-include = ["toad"]
+include = ["rsrd"]

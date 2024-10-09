@@ -24,18 +24,18 @@ from nerfstudio.utils import writer
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.viewer.viewer import Viewer
 
-from toad.optimization.rigid_group_optimizer import (
+from rsrd.motion.motion_optimizer import (
     RigidGroupOptimizer,
     RigidGroupOptimizerConfig,
 )
-from toad.optimization.atap_loss import ATAPConfig
-from toad.extras.cam_helpers import (
+from rsrd.motion.atap_loss import ATAPConfig
+from rsrd.extras.cam_helpers import (
     CameraIntr,
     IPhoneIntr,
     get_ns_camera_at_origin,
     get_vid_frame,
 )
-from toad.extras.viser_rsrd import ViserRSRD
+from rsrd.extras.viser_rsrd import ViserRSRD
 
 torch.set_float32_matmul_precision("high")
 

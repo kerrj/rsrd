@@ -3,7 +3,6 @@ Known constants for RSRD, e.g., camera intrinsics.
 """
 
 import numpy as np
-import viser.transforms as vtf
 from dataclasses import dataclass
 import cv2
 

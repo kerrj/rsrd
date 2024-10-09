@@ -10,7 +10,7 @@ from transformers import (
 )
 
 from hamer_helper import HamerHelper, HandOutputsWrtCamera
-from toad.util.common import Future
+from rsrd.util.common import Future
 
 
 class Hand2DDetector:

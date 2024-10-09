@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import viser
 import viser.transforms as vtf
-from toad.optimization.rigid_group_optimizer import RigidGroupOptimizer
+from rsrd.motion.motion_optimizer import RigidGroupOptimizer
 
 
 class ViserRSRD:
