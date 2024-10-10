@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+
+<robot name="yumi_servo_gripper" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="yumi_servo_gripper_gazebo" params="name">
+
+    <!-- body -->
+    <gazebo reference="${name}_base">
+      <material>Gazebo/Light_Grey</material>
+      <mu1>0.2</mu1>
+      <mu2>0.2</mu2>
+    </gazebo>
+
+
+  </xacro:macro>
+
+</robot>
+

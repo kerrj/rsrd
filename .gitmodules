@@ -1,3 +1,6 @@
 [submodule "dependencies/hamer_helper"]
 	path = dependencies/hamer_helper
 	url = git@github.com:brentyi/hamer_helper.git
+[submodule "dependencies/jaxls"]
+	path = dependencies/jaxls
+	url = git@github.com:brentyi/jaxls.git
