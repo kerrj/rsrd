@@ -627,12 +627,21 @@ class RigidGroupOptimizer:
         )
 
     def create_observation_from_rgb_and_camera(
-        self, rgb: np.ndarray, camera: Cameras
+        self, rgb: np.ndarray, camera: Cameras, metric_depth: Optional[np.ndarray] = None
     ) -> PosedObservation:
+        """
+        Expects [H, W, C], and int.
+        """
         target_frame_rgb = ToTensor()(Image.fromarray(rgb)).permute(1, 2, 0).cuda()
         def dino_fn(x):
             return self.dino_loader.get_pca_feats(x, keep_cuda=True)
-        frame = PosedObservation(target_frame_rgb, camera, dino_fn)
+
+        frame = PosedObservation(
+            target_frame_rgb,
+            camera,
+            dino_fn,
+            metric_depth_img=torch.from_numpy(metric_depth),
+        )
         return frame
 
     def detect_hands(self, frame_id: int):
@@ -663,7 +672,7 @@ class RigidGroupOptimizer:
 
                 # world ~ camera, since we instantiate camera aligned with the origin.
                 transform = (
-                    (tf.SE3(self.T_world_objinit) @ tf.SE3(self.T_objreg_objinit))
+                    self.T_objreg_world
                     .inverse()
                     .as_matrix()
                     .cpu()
@@ -680,3 +689,8 @@ class RigidGroupOptimizer:
                 hand["keypoints_3d"] += translation
 
             self.hands_info[frame_id] = (left_hand, right_hand)
+
+    @property
+    def T_objreg_world(self):
+        assert self.T_objreg_objinit is not None
+        return tf.SE3(self.T_world_objinit) @ tf.SE3(self.T_objreg_objinit)
