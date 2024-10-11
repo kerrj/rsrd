@@ -1,7 +1,7 @@
 from copy import deepcopy
 import json
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 from typing import Any, List, Optional, Tuple, cast, Union
@@ -41,13 +41,12 @@ class RigidGroupOptimizerConfig:
     rank_loss_mult: float = 0.2
     rank_loss_erode: int = 3
     depth_ignore_threshold: float = 0.1  # in meters
-    atap_config: ATAPConfig = ATAPConfig()
+    atap_config: ATAPConfig = field(default_factory=ATAPConfig)
     use_roi: bool = True
     roi_inflate: float = 0.25
     pose_lr: float = 0.005
     pose_lr_final: float = 0.001
     mask_hands: bool = False
-    do_obj_optim: bool = False
     blur_kernel_size: int = 5
     mask_threshold: float = 0.8
     rgb_loss_weight: float = 0.05
@@ -68,16 +67,18 @@ class RigidGroupOptimizer:
     # Poses, as scanned.
     init_means: torch.Tensor
     init_quats: torch.Tensor
-    init_o2w: torch.Tensor
+    T_world_objinit: torch.Tensor
     init_p2o: Float[torch.Tensor, "group 7"]  # noqa: F722
 
-    is_initialized: bool
-    obj_delta: Float[torch.nn.Parameter, "time 7"]  # noqa: F722
     part_deltas: Float[torch.nn.Parameter, "time group 7"]  # noqa: F722
+    T_objreg_objinit: Optional[Float[torch.Tensor, "1 7"]]  # noqa: F722
+    """
+    Transform:
+    - from: `objreg`, in camera frame from which it was registered (e.g., robot camera).
+    - from: `objinit`, in original frame from which it was scanned
+    """
 
-    hands_info: Optional[
-        dict[int, tuple[HandOutputsWrtCamera | None, HandOutputsWrtCamera | None]]
-    ] = None
+    hands_info: dict[int, tuple[HandOutputsWrtCamera | None, HandOutputsWrtCamera | None]]
 
     def __init__(
         self,
@@ -117,7 +118,8 @@ class RigidGroupOptimizer:
         self.configure_from_clusters(labels)
 
         self.sequence = VideoSequence()
-        self.is_initialized = False
+        self.T_objreg_objinit = None
+        self.hands_info = {}
 
     def configure_from_clusters(self, group_labels: torch.Tensor):
         """
@@ -145,8 +147,8 @@ class RigidGroupOptimizer:
         self.part_deltas = torch.nn.Parameter(part_deltas)
 
         # Initialize the object pose. Centered at object centroid, and identity rotation.
-        self.init_o2w = identity_7vec()
-        self.init_o2w[0, 4:] = self.init_means.mean(dim=0).squeeze()
+        self.T_world_objinit = identity_7vec()
+        self.T_world_objinit[0, 4:] = self.init_means.mean(dim=0).squeeze()
 
         # Initialize the part poses to identity. Again, wxyz_xyz.
         # Parts are initialized at the centroid of the part cluster.
@@ -173,11 +175,9 @@ class RigidGroupOptimizer:
     ):
         """
         Initializes object pose w/ observation. Also sets:
-        - `self.obj_delta`
+        - `self.T_objreg_objinit`
         """
-        assert not self.is_initialized, "Can only initialize once"
         self.sequence.append(first_obs)
-
         renders = []
 
         # Initial guess for 3D object location.
@@ -225,63 +225,38 @@ class RigidGroupOptimizer:
         )
 
         assert best_pose.shape == (1, 7), best_pose.shape
-        self.obj_delta = torch.nn.Parameter(best_pose)  # [1, 7]
-
-        if self.config.do_obj_optim:
-            self.obj_delta.requires_grad_(True)
-
-        self.is_initialized = True
+        self.T_objreg_objinit = best_pose
         logger.info("Initialized object pose")
         return renders
 
-    def fit(self, frame_indices: list[int] = [], niter=1, all_frames=False):
+    def fit(self, frame_idx: int, niter=1, all_frames=False):
         # TODO(cmk) temporarily removed all_frames)
+        assert self.T_objreg_objinit is not None, "Must initialize first with the first frame"
         lr_init = self.config.pose_lr
 
-        assert len(frame_indices) == 1
-        idx = frame_indices[0]
-
-        optimizers, schedulers = [], []
-        part_optimizer = torch.optim.Adam([self.part_deltas], lr=lr_init)
-        part_scheduler = ExponentialDecayScheduler(
+        optimizer = torch.optim.Adam([self.part_deltas], lr=lr_init)
+        scheduler = ExponentialDecayScheduler(
             ExponentialDecaySchedulerConfig(
                 lr_final=self.config.pose_lr_final,
                 max_steps=niter,
                 ramp="linear",
                 lr_pre_warmup=1e-5,
             )
-        ).get_scheduler(part_optimizer, lr_init)
-        optimizers.append(part_optimizer)
-        schedulers.append(part_scheduler)
-
-        if self.config.do_obj_optim:
-            obj_optimizer = torch.optim.Adam([self.obj_delta], lr=lr_init)
-            obj_scheduler = ExponentialDecayScheduler(
-                ExponentialDecaySchedulerConfig(
-                    lr_final=self.config.pose_lr_final,
-                    max_steps=niter,
-                    ramp="linear",
-                    lr_pre_warmup=1e-5,
-                )
-            ).get_scheduler(obj_optimizer, lr_init)
-            optimizers.append(obj_optimizer)
-            schedulers.append(obj_scheduler)
+        ).get_scheduler(optimizer, lr_init)
 
         for _ in range(niter):
             # renormalize rotation representation
             with torch.no_grad():
                 self.part_deltas[..., :4] = self.part_deltas[..., :4] / self.part_deltas[..., :4].norm(dim=-1, keepdim=True)
-                self.obj_delta[..., :4] = self.obj_delta[..., :4] / self.obj_delta[..., :4].norm(dim=-1, keepdim=True)
 
-            for optimizer in optimizers:
-                optimizer.zero_grad()
+            optimizer.zero_grad()
 
             # Compute loss
             tape = wp.Tape()
             with tape:
-                this_obj_delta = self.obj_delta[idx].view(1, 7)
-                this_part_deltas = self.part_deltas[idx]
-                observation = self.sequence[idx]
+                this_obj_delta = self.T_objreg_objinit.view(1, 7)
+                this_part_deltas = self.part_deltas[frame_idx]
+                observation = self.sequence[frame_idx]
                 frame = (
                     observation.frame
                     if not self.config.use_roi
@@ -294,7 +269,6 @@ class RigidGroupOptimizer:
                     self.config.use_depth,
                     self.config.use_rgb,
                     self.config.atap_config.use_atap,
-                    self.config.do_obj_optim,
                 )
 
             assert loss is not None
@@ -302,17 +276,14 @@ class RigidGroupOptimizer:
             tape.backward()  # torch, then tape backward, to propagate gradients to warp kernels.
 
             # tape backward only propagates up to the slice, so we need to call autograd again to continue.
-            assert this_obj_delta.grad is not None
             assert this_part_deltas.grad is not None
             torch.autograd.backward(
-                [this_obj_delta, this_part_deltas],
-                grad_tensors=[this_obj_delta.grad, this_part_deltas.grad],
+                [this_part_deltas],
+                grad_tensors=[this_part_deltas.grad],
             )
 
-            for optimizer in optimizers:
-                optimizer.step()
-            for scheduler in schedulers:
-                scheduler.step()
+            optimizer.step()
+            scheduler.step()
 
 
     def _try_opt(
@@ -349,7 +320,6 @@ class RigidGroupOptimizer:
                     pose,
                     identity_7vec().repeat(len(self.group_masks), 1),
                     use_depth,
-                    False,
                     False,
                     False,
                 )
@@ -398,10 +368,9 @@ class RigidGroupOptimizer:
         use_depth: bool,
         use_rgb: bool,
         use_atap: bool,
-        do_obj_optim: bool
     ) -> Optional[torch.Tensor]:
         """
-        Returns a backpropable loss for the given frame
+        Returns a backpropable loss for the given frame.
         """
         with self.render_lock:
             self.dig_model.eval()
@@ -440,10 +409,6 @@ class RigidGroupOptimizer:
             )
             atap_loss = self.atap(weights)
             loss = loss + atap_loss
-
-        if do_obj_optim:
-            part_still_loss = 0.01 * part_deltas[:,4:].norm(dim=-1).mean()
-            loss = loss + part_still_loss
 
         return loss
 
@@ -530,7 +495,7 @@ class RigidGroupOptimizer:
             kernel=apply_to_model_warp,
             dim=self.dig_model.num_points,
             inputs = [
-                wp.from_torch(self.init_o2w),
+                wp.from_torch(self.T_world_objinit),
                 wp.from_torch(self.init_p2o),
                 wp.from_torch(obj_delta),
                 wp.from_torch(part_deltas),
@@ -548,9 +513,10 @@ class RigidGroupOptimizer:
         """
         Applies the ith keyframe to the pose_deltas
         """
+        assert self.T_objreg_objinit is not None, "Must initialize first with the first frame"
         self.apply_to_model(
-            self.obj_delta[i].view(-1, 7),
-            self.part_deltas[i].view(-1, 7)
+            self.T_objreg_objinit,
+            self.part_deltas[i]
         )
 
     def load_tracks(self, path: Path):
@@ -559,8 +525,7 @@ class RigidGroupOptimizer:
         """
         data = json.loads(path.read_text())
         self.part_deltas = torch.nn.Parameter(torch.tensor(data["part_deltas"]).cuda())
-        self.obj_delta = torch.nn.Parameter(torch.tensor(data["obj_delta"]).cuda())
-        self.is_initialized = True
+        self.T_objreg_objinit = torch.tensor(data["T_objreg_objinit"]).cuda()
         
         # Load hand info, if available.
         if "hands" in data:
@@ -586,7 +551,7 @@ class RigidGroupOptimizer:
 
                 self.hands_info[int(tstep)] = (hand_l, hand_r)
         else:
-            self.hands_info = None
+            self.hands_info = {}
 
     def save_tracks(
         self,
@@ -598,9 +563,10 @@ class RigidGroupOptimizer:
         """
         Saves the trajectory to a file
         """
+        assert self.T_objreg_objinit is not None, "Must initialize first with the first frame"
         save_dict: dict[str, Any] = {
             "part_deltas": self.part_deltas.detach().cpu().tolist(),
-            "obj_delta": self.obj_delta.detach().cpu().tolist(),
+            "T_objreg_objinit": self.T_objreg_objinit.detach().cpu().tolist(),
         }
 
         # Save hand info, if available.
@@ -643,16 +609,11 @@ class RigidGroupOptimizer:
         Sets the rgb_frame to optimize the pose for
         rgb_frame: HxWxC tensor image
         """
-        assert self.is_initialized, "Must initialize first with the first frame"
+        assert self.T_objreg_objinit is not None, "Must initialize first with the first frame"
 
         if self.config.use_roi:
             obs.compute_and_set_roi(self)
         self.sequence.append(obs)
-
-        # add another timestep of pose to the part and object poses
-        self.obj_delta = torch.nn.Parameter(
-            torch.cat([self.obj_delta, self.obj_delta[-1].unsqueeze(0)], dim=0)
-        )
 
         if extrapolate_velocity and self.part_deltas.shape[0] > 1:
             with torch.no_grad():
@@ -674,11 +635,48 @@ class RigidGroupOptimizer:
         frame = PosedObservation(target_frame_rgb, camera, dino_fn)
         return frame
 
-    @property
-    def objreg2objinit(self):
+    def detect_hands(self, frame_id: int):
         """
-        Transform:
-        - from: `objreg`, in camera frame from which it was registered (e.g., robot camera).
-        - from: `objinit`, in original frame from which it was scanned
+        Detects hands in the frame, and saves the hand info.
         """
-        return self.obj_delta[0]
+        assert frame_id >= 0 and frame_id < len(self.sequence)
+        assert self.T_objreg_objinit is not None, "Must initialize first with the first frame"
+
+        with torch.no_grad():
+            self.apply_keyframe(frame_id)
+            curr_obs = self.sequence[frame_id]
+            outputs = cast(
+                dict[str, torch.Tensor],
+                self.dig_model.get_outputs(curr_obs.frame.camera),
+            )
+            object_mask = outputs["accumulation"] > self.config.mask_threshold
+
+            # Hands in camera frame.
+            left_hand, right_hand = curr_obs.frame.get_hand_3d(
+                object_mask, outputs["depth"], self.dataset_scale
+            )
+
+            # Save hands in _object_ frame.
+            for hand in [left_hand, right_hand]:
+                if hand is None:
+                    continue
+
+                # world ~ camera, since we instantiate camera aligned with the origin.
+                transform = (
+                    (tf.SE3(self.T_world_objinit) @ tf.SE3(self.T_objreg_objinit))
+                    .inverse()
+                    .as_matrix()
+                    .cpu()
+                    .numpy()
+                    .squeeze()
+                )
+                rotmat = transform[:3, :3]
+                translation = transform[:3, 3]
+
+                for key in ["mano_hand_global_orient", "mano_hand_pose", "verts", "keypoints_3d"]:
+                    hand[key] = np.einsum("ij,...j->...i", rotmat, hand[key])
+                
+                hand["verts"] += translation
+                hand["keypoints_3d"] += translation
+
+            self.hands_info[frame_id] = (left_hand, right_hand)

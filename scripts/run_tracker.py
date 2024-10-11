@@ -109,49 +109,20 @@ def main(
     assert hands is not None
 
     server = viser.ViserServer()
-    viser_rsrd = ViserRSRD(server, optimizer, base_frame_name="/object")
+    viser_rsrd = ViserRSRD(server, optimizer, root_node_name="/object")
 
-    timesteps = len(optimizer.obj_delta)
+    timesteps = len(optimizer.part_deltas)
     track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
     play_checkbox = server.gui.add_checkbox("play", True)
-    hands_handle = None
 
     while True:
         if play_checkbox.value:
             track_slider.value = (track_slider.value + 1) % timesteps
 
         tstep = track_slider.value
-        obj_delta = optimizer.obj_delta[tstep]
         part_deltas = optimizer.part_deltas[tstep]
-
-        viser_rsrd.update_cfg(obj_delta, part_deltas)
-
-        if hands.get(tstep, None) is not None:
-            left_hand, right_hand = hands[tstep]
-            hand_meshes = []
-            if left_hand is not None:
-                for idx in range(left_hand["verts"].shape[0]):
-                    hand_meshes.append(
-                        trimesh.Trimesh(
-                            vertices=left_hand["verts"][idx],
-                            faces=left_hand["faces"].astype(np.int32),
-                        )
-                    )
-
-            if right_hand is not None:
-                for idx in range(right_hand["verts"].shape[0]):
-                    hand_meshes.append(
-                        trimesh.Trimesh(
-                            vertices=right_hand["verts"][idx],
-                            faces=right_hand["faces"].astype(np.int32),
-                        )
-                    )
-
-            hands_handle = server.scene.add_mesh_trimesh(
-                "/hands", sum(hand_meshes, trimesh.Trimesh())
-            )
-        elif hands_handle is not None:
-            hands_handle.visible = False
+        viser_rsrd.update_cfg(part_deltas)
+        viser_rsrd.update_hands(tstep)
 
         time.sleep(0.05)
 
@@ -186,32 +157,15 @@ def track_and_save_motion(
         rgb = get_vid_frame(motion_clip, timestamp)
         obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
         optimizer.add_observation(obs)
-        optimizer.fit([-1], 50)
-
-    # Get 3D hands.
-    hands_dict = {}
-    if save_hand:
-        for frame_id in tqdm.trange(0, num_frames, desc="Detecting hands"):
-            with torch.no_grad():
-                optimizer.apply_keyframe(frame_id)
-                curr_obs = optimizer.sequence[frame_id]
-                outputs = cast(
-                    dict[str, torch.Tensor],
-                    optimizer.dig_model.get_outputs(curr_obs.frame.camera),
-                )
-                object_mask = outputs["accumulation"] > optimizer.config.mask_threshold
-
-                # Hands in camera frame.
-                left_hand, right_hand = curr_obs.frame.get_hand_3d(
-                    object_mask, outputs["depth"], optimizer.dataset_scale
-                )
-                hands_dict[frame_id] = (left_hand, right_hand)
+        optimizer.fit(frame_id + 1, 50)
+        if save_hand:
+            optimizer.detect_hands(frame_id + 1)
 
     # Smooth all frames, together.
     logger.warning("Skipping all-frame smoothing optimization.")
 
     # Save part trajectories.
-    optimizer.save_tracks(track_data_path, hands_dict)
+    optimizer.save_tracks(track_data_path)
 
 
 if __name__ == "__main__":
