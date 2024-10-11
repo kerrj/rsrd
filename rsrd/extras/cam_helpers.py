@@ -2,6 +2,7 @@
 Known constants for RSRD, e.g., camera intrinsics.
 """
 
+from typing import Optional
 import numpy as np
 from dataclasses import dataclass
 import cv2
@@ -18,6 +19,7 @@ class CameraIntr:
     cx: float
     cy: float
     width: int
+    height: int
 
 
 @dataclass
@@ -29,6 +31,7 @@ class IPhoneIntr(CameraIntr):
     cx: float = 1280.0 / 2
     cy: float = 720 / 2
     width: int = 1280
+    height: int = 720
 
 
 class MXIPhoneIntr(CameraIntr):
@@ -39,6 +42,7 @@ class MXIPhoneIntr(CameraIntr):
     cx = 644.0
     cy = 361.0
     width = 1280
+    height = 720
 
 
 class IPhoneVerticalIntr(CameraIntr):
@@ -61,12 +65,34 @@ class GoProIntr(CameraIntr):
     height = 2160
 
 
-def get_ns_camera_at_origin(cam_intr: CameraIntr) -> Cameras:
+def get_ns_camera_at_origin(
+    cam_intr: Optional[CameraIntr] = None,
+    K: Optional[np.ndarray] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+) -> Cameras:
     """
     Initialize a nerfstudio camera centered at the origin, opengl conventions (z backwards).
     """
     cam_pose = torch.eye(4).float()[None, :3, :]
     assert cam_pose.shape == (1, 3, 4)
+
+    if cam_intr is None and K is None:
+        raise ValueError("Must provide either cam_intr or K.")
+
+    if K is not None and cam_intr is None:
+        assert width is not None
+        assert height is not None
+        cam_intr = CameraIntr(
+            name="custom",
+            fx=K[0, 0],
+            fy=K[1, 1],
+            cx=K[0, 2],
+            cy=K[1, 2],
+            width=width,
+            height=height,
+        )
+    assert cam_intr is not None
 
     return Cameras(
         camera_to_worlds=cam_pose,
@@ -75,6 +101,7 @@ def get_ns_camera_at_origin(cam_intr: CameraIntr) -> Cameras:
         cx=cam_intr.cx,
         cy=cam_intr.cy,
         width=cam_intr.width,
+        height=cam_intr.height,
     )
 
 

@@ -4,3 +4,6 @@
 [submodule "dependencies/jaxls"]
 	path = dependencies/jaxls
 	url = git@github.com:brentyi/jaxls.git
+[submodule "dependencies/raftstereo"]
+	path = dependencies/raftstereo
+	url = git@github.com:kerrj/RAFT-Stereo.git

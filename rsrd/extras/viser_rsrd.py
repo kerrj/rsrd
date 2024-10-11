@@ -33,7 +33,6 @@ class ViserRSRD:
     _server: viser.ViserServer
     optimizer: RigidGroupOptimizer
     base_frame_name: str
-    base_frame: viser.FrameHandle
     part_frames: list[viser.FrameHandle]
     part_delta_frames: list[viser.FrameHandle]
     _scale: float
@@ -59,11 +58,6 @@ class ViserRSRD:
 
         self.base_frame_name = root_node_name
         self._scale = scale
-
-        self.base_frame = self._server.scene.add_frame(
-            self.base_frame_name,
-            show_axes=False,
-        )
 
         self.part_frames = []
         self.part_delta_frames = []
