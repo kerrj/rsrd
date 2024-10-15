@@ -8,14 +8,7 @@ import viser
 import viser.transforms as vtf
 import trimesh
 from rsrd.motion.motion_optimizer import RigidGroupOptimizer
-
-MANO_KEYPOINTS = {
-    4: "thumb",
-    8: "index",
-    12: "middle",
-    16: "ring",
-    20: "pinky",
-}
+from rsrd.util.common import MANO_KEYPOINTS
 
 
 class ViserRSRD:
@@ -159,7 +152,7 @@ class ViserRSRD:
                         )
                     )
                 )
-                for keypoint_idx in MANO_KEYPOINTS:
+                for keypoint_idx in MANO_KEYPOINTS.values():
                     keypoint = hand["keypoints_3d"][idx][keypoint_idx]
                     if self.show_finger_keypoints:
                         self.hand_handles.append(

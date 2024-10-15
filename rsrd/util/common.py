@@ -2,6 +2,22 @@ import torch
 from rsrd.transforms import SE3, SO3
 from nerfstudio.cameras.cameras import Cameras
 from typing import TypeVar, Generic
+from typing import TypedDict
+
+class MANOKeypoints(TypedDict):
+    thumb: int
+    index: int
+    middle: int
+    ring: int
+    pinky: int
+
+MANO_KEYPOINTS: MANOKeypoints = {
+    "thumb": 4,
+    "index": 8,
+    "middle": 12,
+    "ring": 16,
+    "pinky": 20,
+}
 
 
 T = TypeVar('T')
