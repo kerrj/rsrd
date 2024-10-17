@@ -7,3 +7,9 @@
 [submodule "dependencies/jaxfg"]
 	path = dependencies/jaxfg
 	url = git@github.com:brentyi/jaxfg.git
+[submodule "dependencies/jaxls"]
+	path = dependencies/jaxls
+	url = git@github.com:brentyi/jaxls.git
+[submodule "dependencies/jaxmp"]
+	path = dependencies/jaxmp
+	url = git@github.com:chungmin99/jaxmp.git
