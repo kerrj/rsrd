@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from threading import Lock
 import moviepy.editor as mpy
+import plotly.express as px
 
 import cv2
 import numpy as np
@@ -73,7 +74,6 @@ def main(
     # TODO(cmk) add `reset_colors` to GARField main branch.
     try:
         pipeline.load_state()
-        pipeline.reset_colors()
     except FileNotFoundError:
         print("No state found, starting from scratch")
 
@@ -93,6 +93,7 @@ def main(
 
     # Generate + load keyframes.
     camopt_render_path = output_dir / "camopt_render.mp4"
+    frame_opt_path = output_dir / "frame_opt.mp4"
     track_data_path = output_dir / "keyframes.txt"
     if not track_data_path.exists():
         track_and_save_motion(
@@ -100,6 +101,7 @@ def main(
             video,
             camera_type,
             camopt_render_path,
+            frame_opt_path,
             track_data_path,
             save_hand,
         )
@@ -108,8 +110,18 @@ def main(
     hands = optimizer.hands_info
     assert hands is not None
 
+    overlay_video = cv2.VideoCapture(str(frame_opt_path))
+
+    # Before visualizing, reset colors...
+    pipeline.reset_colors()
+
     server = viser.ViserServer()
     viser_rsrd = ViserRSRD(server, optimizer, root_node_name="/object")
+
+    height, width = camera_type.height, camera_type.width
+    aspect = height / width
+    video_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
+    overlay_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
 
     timesteps = len(optimizer.part_deltas)
     track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
@@ -124,6 +136,22 @@ def main(
         viser_rsrd.update_cfg(part_deltas)
         viser_rsrd.update_hands(tstep)
 
+        fig = px.imshow(get_vid_frame(video, frame_idx=tstep))
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+        )
+        video_handle.figure = fig
+
+        fig = px.imshow(get_vid_frame(overlay_video, frame_idx=tstep))
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+        )
+        overlay_handle.figure = fig
+
         time.sleep(0.05)
 
 
@@ -133,15 +161,15 @@ def track_and_save_motion(
     motion_clip: cv2.VideoCapture,
     camera_type: CameraIntr,
     camopt_render_path: Path,
+    frame_opt_path: Path,
     track_data_path: Path,
     save_hand: bool = False,
 ):
     """Get part poses for each frame in the video, ad save the keyframes to a file."""
     camera = get_ns_camera_at_origin(camera_type)
     num_frames = int(motion_clip.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = motion_clip.get(cv2.CAP_PROP_FPS)
 
-    rgb = get_vid_frame(motion_clip, 0)
+    rgb = get_vid_frame(motion_clip, frame_idx=0)
     obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
 
     # Initialize.
@@ -152,20 +180,37 @@ def track_and_save_motion(
     out_clip.write_videofile(str(camopt_render_path))
 
     # Add each frame, optimize them separately.
+    renders = []
     for frame_id in tqdm.trange(0, num_frames):
-        timestamp = frame_id / fps
-        rgb = get_vid_frame(motion_clip, timestamp)
+        rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
         obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
         optimizer.add_observation(obs)
-        optimizer.fit(frame_id + 1, 50)
+        optimizer.fit(frame_id, 50)
+
+        # Create a render for the current timeframe.
+        optimizer.apply_keyframe(frame_id)
+        with torch.no_grad():
+            outputs = cast(
+                dict[str, torch.Tensor],
+                optimizer.dig_model.get_outputs(optimizer.sequence[frame_id].frame.camera)
+            )
+        render = (outputs["rgb"].cpu() * 255).numpy().astype(np.uint8)
+        rgb = cv2.resize(rgb, (render.shape[1], render.shape[0]))
+        render = (render * 0.8 + rgb * 0.2).astype(np.uint8)
+        renders.append(render)
+
         if save_hand:
-            optimizer.detect_hands(frame_id + 1)
+            optimizer.detect_hands(frame_id)
 
     # Smooth all frames, together.
     logger.warning("Skipping all-frame smoothing optimization.")
 
     # Save part trajectories.
     optimizer.save_tracks(track_data_path)
+
+    # Save the frames.
+    out_clip = mpy.ImageSequenceClip(renders, fps=30)
+    out_clip.write_videofile(str(frame_opt_path))
 
 
 if __name__ == "__main__":

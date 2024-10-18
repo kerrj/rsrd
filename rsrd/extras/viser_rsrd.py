@@ -123,43 +123,47 @@ class ViserRSRD:
             )
 
     def update_hands(self, tstep: int): 
-        for handle in self.hand_handles:
-            handle.remove()
-        self.hand_handles = []
-
         if (
             not self.show_hands
             or self.optimizer.hands_info is None
             or self.optimizer.hands_info.get(tstep, None) is None
         ):
+            for handle in self.hand_handles:
+                handle.remove()
+            self.hand_handles = []
             return
 
         hand_idx = 0
         keypoint_mesh = trimesh.creation.uv_sphere(radius=0.01 * self._scale)
         keypoint_mesh.visual.vertex_colors = [255, 0, 0, 255]
 
-        left_hand, right_hand = self.optimizer.hands_info[tstep]
-        for hand in [left_hand, right_hand]:
-            if hand is None:
-                continue
-            for idx in range(hand["verts"].shape[0]):
-                self.hand_handles.append(
-                    self._server.scene.add_mesh_trimesh(
-                        self.base_frame_name + f"/hand_{hand_idx}",
-                        trimesh.Trimesh(
-                            vertices=hand["verts"][idx] * self._scale,
-                            faces=hand["faces"].astype(np.int32),
-                        )
-                    )
-                )
-                for keypoint_idx in MANO_KEYPOINTS.values():
-                    keypoint = hand["keypoints_3d"][idx][keypoint_idx]
-                    if self.show_finger_keypoints:
-                        self.hand_handles.append(
-                            self._server.scene.add_mesh_trimesh(
-                                self.base_frame_name + f"/hand_{hand_idx}/keypoint_{keypoint_idx}",
-                                keypoint_mesh,
-                                position=keypoint * self._scale,
+        with self._server.atomic():
+            for handle in self.hand_handles:
+                handle.remove()
+            self.hand_handles = []
+
+            left_hand, right_hand = self.optimizer.hands_info[tstep]
+            for hand in [left_hand, right_hand]:
+                if hand is None:
+                    continue
+                for idx in range(hand["verts"].shape[0]):
+                    self.hand_handles.append(
+                        self._server.scene.add_mesh_trimesh(
+                            self.base_frame_name + f"/hand_{hand_idx}",
+                            trimesh.Trimesh(
+                                vertices=hand["verts"][idx] * self._scale,
+                                faces=hand["faces"].astype(np.int32),
                             )
                         )
-                hand_idx += 1
+                    )
+                    for keypoint_idx in MANO_KEYPOINTS.values():
+                        keypoint = hand["keypoints_3d"][idx][keypoint_idx]
+                        if self.show_finger_keypoints:
+                            self.hand_handles.append(
+                                self._server.scene.add_mesh_trimesh(
+                                    self.base_frame_name + f"/hand_{hand_idx}/keypoint_{keypoint_idx}",
+                                    keypoint_mesh,
+                                    position=keypoint * self._scale,
+                                )
+                            )
+                    hand_idx += 1
