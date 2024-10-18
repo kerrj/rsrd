@@ -6,7 +6,37 @@ dependencies=[
     "nerfstudio",
     "hamer",
     "loguru"
+    "torch",  # gpu
+    "jax",  # cpu
 ]
+
+# need python3.12 (for jaxls)
+
+## Setup torch / jax environment.
+# do everything in either pip or conda, to avoid pip/conda issues.
+# pip3 install torch torchvision torchaudio
+# pip install -U jax==0.4.31 (?)
+# conda install conda-forge::suitesparse
+
+# SUITESPARSE_INCLUDE_DIR=/home/chungmin/anaconda3/envs/please3/include/suitesparse/ SUITESPARSE_LIBRARY_DIR=/home/chungmin/anaconda3/envs/please3/lib/ pip install scikit-sparse -I
+# (don't do the conda install scikit-sparse way, you might install two numpys!!)
+
+# Installing nerfstudio stuff...
+# conda install -c "nvidia/label/cuda-12.2.0" cuda-toolkit
+# pip install nerfstudio (from local clone)
+# pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+# pip install gsplat from source. (cache file missing).
+# Open3d is a blocker.
+# cuml needs to be nightly (also is a blocker)
+
+# Install garfield.
+# install warp-lang
+
+# chumpy... breaks on 3.11+
+# pip install git+https://github.com/mattloper/chumpy@9b045ff5d6588a24a0bab52c83f032e2ba433e17
 
 [tool.setuptools.packages.find]
 include = ["rsrd"]
+
+
+# moviepy

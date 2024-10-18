@@ -34,35 +34,37 @@ class IPhoneIntr(CameraIntr):
     height: int = 720
 
 
+@dataclass
 class MXIPhoneIntr(CameraIntr):
-    # TODO(cmk) get iphone model.
     name: str = "mx_iphone"
-    fx = 1085.0
-    fy = 1085.0
-    cx = 644.0
-    cy = 361.0
-    width = 1280
-    height = 720
+    fx: float = 1085.0
+    fy: float = 1085.0
+    cx: float = 644.0
+    cy: float = 361.0
+    width: int = 1280
+    height: int = 720
 
 
+@dataclass
 class IPhoneVerticalIntr(CameraIntr):
     name: str = "iphone_vertical"
-    fy = 1137.0
-    fx = 1137.0
-    cy = 1280 / 2
-    cx = 720 / 2
-    height = 1280
-    width = 720
+    fy: float = 1137.0
+    fx: float = 1137.0
+    cy: float = 1280 / 2
+    cx: float = 720 / 2
+    height: int = 1280
+    width: int = 720
 
 
+@dataclass
 class GoProIntr(CameraIntr):
     name: str = "gopro"
-    fx = 2.55739580e03
-    fy = 2.55739580e03
-    cx = 1.92065792e03
-    cy = 1.07274675e03
-    width = 3840
-    height = 2160
+    fx: float = 2.55739580e03
+    fy: float = 2.55739580e03
+    cx: float = 1.92065792e03
+    cy: float = 1.07274675e03
+    width: int = 3840
+    height: int = 2160
 
 
 def get_ns_camera_at_origin(
@@ -105,17 +107,27 @@ def get_ns_camera_at_origin(
     )
 
 
-def get_vid_frame(cap: cv2.VideoCapture, timestamp: float) -> np.ndarray:
+def get_vid_frame(
+    cap: cv2.VideoCapture,
+    timestamp: Optional[float] = None,
+    frame_idx: Optional[int] = None,
+) -> np.ndarray:
     """Get frame from video at timestamp (in seconds)."""
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps == 0:
-        raise ValueError("Video has unknown FPS.")
+    if frame_idx is None:
+        assert timestamp is not None
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps == 0:
+            raise ValueError("Video has unknown FPS.")
+        frame_idx = min(
+            int(timestamp * fps),
+            int(cap.get(cv2.CAP_PROP_FRAME_COUNT) - 1)
+        )
+    assert frame_idx is not None and frame_idx >= 0
 
-    frame_idx = min(int(timestamp * fps), int(cap.get(cv2.CAP_PROP_FRAME_COUNT) - 1))
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
     success, frame = cap.read()
     if not success:
-        raise ValueError(f"Failed to read frame at {timestamp} s.")
+        raise ValueError(f"Failed to read frame at {timestamp} s, or frame {frame_idx}.")
 
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     return frame

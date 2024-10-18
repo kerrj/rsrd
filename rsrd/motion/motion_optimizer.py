@@ -142,8 +142,7 @@ class RigidGroupOptimizer:
         self.group_masks = [(self.group_labels == cid).cuda() for cid in range(self.group_labels.max() + 1)]
 
         # Store pose of each part, as wxyz_xyz.
-        part_deltas = torch.zeros(1, self.num_groups, 7, dtype=torch.float32, device="cuda")
-        part_deltas[:, :, 0] = 1  # wxyz = [1, 0, 0, 0] is identity.
+        part_deltas = torch.zeros(0, self.num_groups, 7, dtype=torch.float32, device="cuda")
         self.part_deltas = torch.nn.Parameter(part_deltas)
 
         # Initialize the object pose. Centered at object centroid, and identity rotation.
@@ -177,7 +176,6 @@ class RigidGroupOptimizer:
         Initializes object pose w/ observation. Also sets:
         - `self.T_objreg_objinit`
         """
-        self.sequence.append(first_obs)
         renders = []
 
         # Initial guess for 3D object location.
@@ -620,6 +618,9 @@ class RigidGroupOptimizer:
                 next_part_delta = extrapolate_poses(
                     self.part_deltas[-2], self.part_deltas[-1], 0.2
                 )
+        elif self.part_deltas.shape[0] == 0:
+            next_part_delta = torch.zeros(self.num_groups, 7, device="cuda")
+            next_part_delta[..., 0] = 1.0  # wxyz_xyz.
         else:
             next_part_delta = self.part_deltas[-1]
         self.part_deltas = torch.nn.Parameter(
@@ -640,7 +641,9 @@ class RigidGroupOptimizer:
             target_frame_rgb,
             camera,
             dino_fn,
-            metric_depth_img=torch.from_numpy(metric_depth) if metric_depth is not None else None,
+            metric_depth_img=(
+                None if metric_depth is None else torch.from_numpy(metric_depth)
+            )
         )
         return frame
 
