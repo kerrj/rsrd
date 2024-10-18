@@ -5,6 +5,7 @@ version = "0.0.1"
 dependencies=[
     "nerfstudio",
     "hamer",
+    "loguru"
 ]
 
 [tool.setuptools.packages.find]

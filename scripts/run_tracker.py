@@ -31,7 +31,7 @@ from rsrd.motion.motion_optimizer import (
 from rsrd.motion.atap_loss import ATAPConfig
 from rsrd.extras.cam_helpers import (
     CameraIntr,
-    IPhoneIntr,
+    IPhoneIntr,IPhoneVerticalIntr,
     get_ns_camera_at_origin,
     get_vid_frame,
 )
@@ -45,7 +45,7 @@ def main(
     dig_config_path: Path,
     video_path: Path,
     output_dir: Path,
-    camera_type: CameraIntr = IPhoneIntr(),
+    camera_type: CameraIntr = IPhoneVerticalIntr(),
     save_hand: bool = True,
 ):
     """Track objects in video using RSRD."""
@@ -57,6 +57,8 @@ def main(
 
     # Load DIG model, create viewer.
     train_config, pipeline, _, _ = eval_setup(dig_config_path)
+    del pipeline.garfield_pipeline
+    pipeline.eval()
     viewer_lock = Lock()
     Viewer(
         ViewerConfig(default_composite_depth=False, num_rays_per_chunk=-1),
@@ -70,7 +72,6 @@ def main(
         train_config.logging, max_iter=train_config.max_num_iterations
     )
 
-    # TODO(cmk) add `reset_colors` to GARField main branch.
     try:
         pipeline.load_state()
         pipeline.reset_colors()
@@ -158,6 +159,7 @@ def track_and_save_motion(
         obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
         optimizer.add_observation(obs)
         optimizer.fit(frame_id + 1, 50)
+        obs.clear_cache() # Clear the cache to save memory (can overflow on very long videos)
         if save_hand:
             optimizer.detect_hands(frame_id + 1)
 

@@ -153,6 +153,11 @@ class Frame:
 
         return (left_hands, right_hands)
 
+    def clear_cache(self):
+        self._depth = None
+        self._dino_feats = None
+        self._hand_mask = None
+
 class PosedObservation:
     """
     Class for computing relevant data products for a frame and storing them.
@@ -195,6 +200,11 @@ class PosedObservation:
             self.rasterize_resolution / max(camera.width.item(), camera.height.item())
         )
         self._frame = Frame(rgb, cam, dino_fn, metric_depth_img)
+
+    def clear_cache(self):
+        self._frame.clear_cache()
+        if self._roi_frame is not None:
+            self._roi_frame.clear_cache()
 
     @property
     def frame(self):

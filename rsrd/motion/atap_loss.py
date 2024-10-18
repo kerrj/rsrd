@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from typing import List
-from lerf.dig import DiGModel
+from dig.dig import DiGModel
 import warp as wp
 from dataclasses import dataclass
 from loguru import logger
@@ -12,7 +12,7 @@ from rsrd.util.warp_kernels import atap_loss_warp
 @dataclass
 class ATAPConfig:
     use_atap: bool = True
-    touch_radius: float = 0.0015
+    touch_radius: float = 0.005
     N: int = 500
     loss_mult: float = 0.2
     loss_alpha: float = (

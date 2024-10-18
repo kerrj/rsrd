@@ -7,3 +7,6 @@
 [submodule "dependencies/jaxfg"]
 	path = dependencies/jaxfg
 	url = git@github.com:brentyi/jaxfg.git
+[submodule "dependencies/dig"]
+	path = dependencies/dig
+	url = https://github.com/kerrj/dig

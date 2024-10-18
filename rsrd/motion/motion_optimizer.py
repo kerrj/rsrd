@@ -25,8 +25,8 @@ from nerfstudio.engine.schedulers import (
 from nerfstudio.model_components.losses import depth_ranking_loss
 from nerfstudio.pipelines.base_pipeline import Pipeline
 
-from lerf.dig import DiGModel
-from lerf.data.utils.dino_dataloader import DinoDataloader
+from dig.dig import DiGModel
+from dig.data.utils.dino_dataloader import DinoDataloader
 
 import rsrd.transforms as tf
 from rsrd.motion.atap_loss import ATAPLoss, ATAPConfig
@@ -640,7 +640,7 @@ class RigidGroupOptimizer:
             target_frame_rgb,
             camera,
             dino_fn,
-            metric_depth_img=torch.from_numpy(metric_depth),
+            metric_depth_img=torch.from_numpy(metric_depth) if metric_depth is not None else None,
         )
         return frame
 
