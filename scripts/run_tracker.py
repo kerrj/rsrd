@@ -46,7 +46,7 @@ def main(
     dig_config_path: Path,
     video_path: Path,
     output_dir: Path,
-    camera_type: CameraIntr = IPhoneVerticalIntr(),
+    camera_type: CameraIntr = IPhoneIntr(),
     save_hand: bool = True,
 ):
     """Track objects in video using RSRD."""
@@ -114,6 +114,7 @@ def main(
     overlay_video = cv2.VideoCapture(str(frame_opt_path))
 
     # Before visualizing, reset colors...
+    optimizer.reset_transforms()
     pipeline.reset_colors()
 
     server = viser.ViserServer()
