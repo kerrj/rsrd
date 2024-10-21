@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional, cast
 from jax import Array
+import jax
 import jaxlie
 import numpy as onp
 import jax.numpy as jnp
@@ -47,10 +48,11 @@ class GraspableObject:
 
             # We generate grasps at nerfstudio scale, then scale them to world scale.
             graspable_part.mesh.vertices /= self.optimizer.dataset_scale
-            graspable_part._grasps = AntipodalGrasps(
-                centers=graspable_part._grasps.centers / self.optimizer.dataset_scale,
-                axes=graspable_part._grasps.axes,
-            )
+            with jdc.copy_and_mutate(graspable_part) as graspable_part:
+                graspable_part._grasps = AntipodalGrasps(
+                    centers=graspable_part._grasps.centers / self.optimizer.dataset_scale,
+                    axes=graspable_part._grasps.axes,
+                )
 
             self.parts.append(graspable_part)
 
@@ -101,9 +103,32 @@ class GraspableObject:
         return sum_mesh
 
     def rank_parts_to_move_single(self) -> list[int]:
+        mat_left, mat_right = self._get_matrix_for_hand_assignments()
+        sum_part_dist = (mat_left + mat_right).sum(axis=0)
+        part_indices = sum_part_dist.argsort()
+        return part_indices.tolist()
+    
+    def rank_parts_to_move_bimanual(self) -> list[tuple[int, int]]:
+        mat_left, mat_right = self._get_matrix_for_hand_assignments()
+
+        num_groups = mat_left.shape[1]
+        assignments = []
+        for li in range(num_groups):
+            for ri in range(num_groups):
+                if li == ri:
+                    continue
+                dist = mat_left[:, li].sum() + mat_right[:, ri].sum()
+                assignments.append((li, ri, dist))
+        assignments.sort(key=lambda x: x[2])
+        return [(a[0], a[1]) for a in assignments]
+    
+    def _get_matrix_for_hand_assignments(self) -> tuple[onp.ndarray, onp.ndarray]:
         assert self.optimizer.hands_info is not None
-        sum_part_dist = onp.array([0.0] * len(self.parts))
-        for tstep, (l_hand, r_hand) in self.optimizer.hands_info.items():
+        num_timesteps = len(self.optimizer.hands_info)
+        num_parts = len(self.parts)
+        sum_part_dist_left = onp.zeros((num_timesteps, num_parts))
+        sum_part_dist_right = onp.zeros((num_timesteps, num_parts))
+        for idx, (tstep, (l_hand, r_hand)) in enumerate(self.optimizer.hands_info.items()):
             for part_idx in range(len(self.parts)):
                 delta = self.optimizer.part_deltas[tstep, part_idx]
                 part_means = (
@@ -119,41 +144,43 @@ class GraspableObject:
                     @ jnp.array(part_means)
                 )
 
-                part_dist = onp.inf
-                for hand in [l_hand, r_hand]:
-                    if hand is not None:
-                        for hand_idx in range(hand["keypoints_3d"].shape[0]):
-                            pointer = hand["keypoints_3d"][hand_idx, MANO_KEYPOINTS["index"]]
-                            part_dist = min(
-                                jnp.linalg.norm(pointer - part_means, axis=1).min().item(), part_dist
-                            )
-                sum_part_dist[part_idx] += part_dist
+                if l_hand is None:
+                    l_hand = {"keypoints_3d": onp.zeros((0,))}
+                if r_hand is None:
+                    r_hand = {"keypoints_3d": onp.zeros((0,))}
 
-        # argsort
-        part_indices = sum_part_dist.argsort()
-        return part_indices.tolist()
+                for hand_idx in range(l_hand["keypoints_3d"].shape[0]):
+                    pointer = l_hand["keypoints_3d"][hand_idx, MANO_KEYPOINTS["index"]]
+                    d_pointer = jnp.linalg.norm(pointer - part_means, axis=1).min().item()
+                    thumb = l_hand["keypoints_3d"][hand_idx, MANO_KEYPOINTS["thumb"]]
+                    d_thumb = jnp.linalg.norm(thumb - part_means, axis=1).min().item()
+                    sum_part_dist_left[idx, part_idx] += (d_pointer + d_thumb) / 2
 
-    
+                for hand_idx in range(r_hand["keypoints_3d"].shape[0]):
+                    pointer = r_hand["keypoints_3d"][hand_idx, MANO_KEYPOINTS["index"]]
+                    d_pointer = jnp.linalg.norm(pointer - part_means, axis=1).min().item()
+                    thumb = r_hand["keypoints_3d"][hand_idx, MANO_KEYPOINTS["thumb"]]
+                    d_thumb = jnp.linalg.norm(thumb - part_means, axis=1).min().item()
+                    sum_part_dist_right[idx, part_idx] += (d_pointer + d_thumb) / 2
+            
+        return sum_part_dist_left, sum_part_dist_right
 
-@dataclass
+
+@jdc.pytree_dataclass
 class GraspablePart:
-    mesh: trimesh.Trimesh
+    mesh: jdc.Static[trimesh.Trimesh]
     _grasps: AntipodalGrasps
 
     @staticmethod
-    def from_mesh(mesh: trimesh.Trimesh) -> GraspablePart:
-        return GraspablePart(
-            mesh=mesh,
-            _grasps=AntipodalGrasps.from_sample_mesh(mesh),
-        )
+    def from_mesh(mesh: trimesh.Trimesh, max_grasps: int = 10) -> GraspablePart:
+        grasps = AntipodalGrasps.from_sample_mesh(mesh, max_samples=100)
+        grasps = jax.tree.map(lambda x: x[:max_grasps], grasps)
+        return GraspablePart(mesh=mesh, _grasps=grasps)
 
     @staticmethod
     def from_points(points: onp.ndarray) -> GraspablePart:
         mesh = GraspablePart._points_to_mesh(points)
-        return GraspablePart(
-            mesh=mesh,
-            _grasps=AntipodalGrasps.from_sample_mesh(mesh),
-        )
+        return GraspablePart.from_mesh(mesh)
 
     @staticmethod
     def _points_to_mesh(points: onp.ndarray) -> trimesh.Trimesh:

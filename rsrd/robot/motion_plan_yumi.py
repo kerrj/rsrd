@@ -46,7 +46,7 @@ def motion_plan_yumi(
     kin: JaxKinTree,
     target_joint_inds: Float[Array, "inds"],
     target_ee_per_ind: Float[Array, "inds timestep 7"],
-    rest_pose: Array,
+    rest_pose: Array = jnp.array(YUMI_REST_POSE),
     pos_weight: jdc.Static[float] = 5.0,
     rot_weight: jdc.Static[float] = 1.0,
     limit_weight: jdc.Static[float] = 100.0,
@@ -62,7 +62,7 @@ def motion_plan_yumi(
 
     factors = []
     for tstep in range(timesteps):
-        for idx in target_joint_inds:
+        for i, idx in enumerate(target_joint_inds):
             factors.extend(
                 [
                     jaxls.Factor.make(
@@ -70,7 +70,7 @@ def motion_plan_yumi(
                         (
                             kin,
                             traj_vars[tstep],
-                            jaxlie.SE3(target_ee_per_ind[idx][tstep]),
+                            jaxlie.SE3(target_ee_per_ind[i][tstep]),
                             idx,
                             jnp.array([pos_weight] * 3 + [rot_weight] * 3),
                         ),
@@ -132,8 +132,8 @@ def motion_plan_yumi(
             pose_target = target_ee_per_ind[i]
             succ = jnp.all(
                 jnp.isclose(
-                    jaxlie.SE3(pose_target).as_matrix(),
-                    jaxlie.SE3(pose_from_joints).as_matrix(),
+                    jaxlie.SE3(pose_target).translation(),
+                    jaxlie.SE3(pose_from_joints).translation(),
                     atol=1e-2
                 )
             )
