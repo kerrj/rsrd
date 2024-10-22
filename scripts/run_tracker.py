@@ -122,12 +122,14 @@ def main(
 
     height, width = camera_type.height, camera_type.width
     aspect = height / width
-    video_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
-    overlay_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
 
     timesteps = len(optimizer.part_deltas)
     track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
     play_checkbox = server.gui.add_checkbox("play", True)
+    show_overlay_checkbox = server.gui.add_checkbox("Show Demo Vid (slow)", False)
+    
+    video_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
+    overlay_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
 
     while True:
         if play_checkbox.value:
@@ -137,24 +139,29 @@ def main(
         part_deltas = optimizer.part_deltas[tstep]
         viser_rsrd.update_cfg(part_deltas)
         viser_rsrd.update_hands(tstep)
+        if show_overlay_checkbox.value:
+            video_handle.visible = True
+            overlay_handle.visible = True
+            fig = px.imshow(get_vid_frame(video, frame_idx=tstep))
+            fig.update_layout(
+                margin=dict(l=0, r=0, t=0, b=0),
+                xaxis=dict(visible=False),
+                yaxis=dict(visible=False),
+            )
+            video_handle.figure = fig
 
-        fig = px.imshow(get_vid_frame(video, frame_idx=tstep))
-        fig.update_layout(
-            margin=dict(l=0, r=0, t=0, b=0),
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
-        )
-        video_handle.figure = fig
+            fig = px.imshow(get_vid_frame(overlay_video, frame_idx=tstep))
+            fig.update_layout(
+                margin=dict(l=0, r=0, t=0, b=0),
+                xaxis=dict(visible=False),
+                yaxis=dict(visible=False),
+            )
+            overlay_handle.figure = fig
+        else:
+            video_handle.visible = False
+            overlay_handle.visible = False
+            time.sleep(1/30)
 
-        fig = px.imshow(get_vid_frame(overlay_video, frame_idx=tstep))
-        fig.update_layout(
-            margin=dict(l=0, r=0, t=0, b=0),
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
-        )
-        overlay_handle.figure = fig
-
-        time.sleep(0.05)
 
 
 # But this should _really_ be in the rigid optimizer.
@@ -187,10 +194,20 @@ def track_and_save_motion(
         rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
         obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
         optimizer.add_observation(obs)
-        optimizer.fit(frame_id, 50)
-        obs.clear_cache() # Clear the cache to save memory (can overflow on very long videos)
+        optimizer.fit([frame_id], 50)
+        if num_frames > 300:
+            obs.clear_cache() # Clear the cache to save memory (can overflow on very long videos)
 
-        # Create a render for the current timeframe.
+        if save_hand:
+            optimizer.detect_hands(frame_id)
+    # Smooth all frames, together.
+    logger.info("Performing temporal smoothing.")
+    optimizer.fit(list(range(num_frames)), 50)
+
+
+    # Create a render for the video.
+    for frame_id in tqdm.trange(0, num_frames):
+        rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
         optimizer.apply_keyframe(frame_id)
         with torch.no_grad():
             outputs = cast(
@@ -201,12 +218,6 @@ def track_and_save_motion(
         rgb = cv2.resize(rgb, (render.shape[1], render.shape[0]))
         render = (render * 0.8 + rgb * 0.2).astype(np.uint8)
         renders.append(render)
-
-        if save_hand:
-            optimizer.detect_hands(frame_id)
-
-    # Smooth all frames, together.
-    logger.warning("Skipping all-frame smoothing optimization.")
 
     # Save part trajectories.
     optimizer.save_tracks(track_data_path)

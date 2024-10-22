@@ -31,7 +31,7 @@ from dig.data.utils.dino_dataloader import DinoDataloader
 import rsrd.transforms as tf
 from rsrd.motion.atap_loss import ATAPLoss, ATAPConfig
 from rsrd.motion.observation import PosedObservation, VideoSequence, Frame
-from rsrd.util.warp_kernels import apply_to_model_warp
+from rsrd.util.warp_kernels import apply_to_model_warp, traj_smoothness_loss_warp
 from rsrd.util.common import identity_7vec, extrapolate_poses, mnn_matcher
 
 @dataclass
@@ -227,7 +227,7 @@ class RigidGroupOptimizer:
         logger.info("Initialized object pose")
         return renders
 
-    def fit(self, frame_idx: int, niter=1, all_frames=False):
+    def fit(self, frame_idxs: List[int], niter=1):
         # TODO(cmk) temporarily removed all_frames)
         assert self.T_objreg_objinit is not None, "Must initialize first with the first frame"
         lr_init = self.config.pose_lr
@@ -239,6 +239,7 @@ class RigidGroupOptimizer:
                 max_steps=niter,
                 ramp="linear",
                 lr_pre_warmup=1e-5,
+                warmup_steps=10 if len(frame_idxs) > 1 else 0,
             )
         ).get_scheduler(optimizer, lr_init)
 
@@ -250,39 +251,63 @@ class RigidGroupOptimizer:
             optimizer.zero_grad()
 
             # Compute loss
-            tape = wp.Tape()
-            with tape:
-                this_obj_delta = self.T_objreg_objinit.view(1, 7)
-                this_part_deltas = self.part_deltas[frame_idx]
-                observation = self.sequence[frame_idx]
-                frame = (
-                    observation.frame
-                    if not self.config.use_roi
-                    else observation.roi_frame
+            if len(frame_idxs) > 1:
+                # temporal smoothness loss 
+                tape = wp.Tape()
+                with tape:
+                    part_smoothness= .2 * self.get_smoothness_loss(self.part_deltas, 1.0, 1.0, frame_idxs)
+                part_smoothness.backward()
+                tape.backward()
+                # zero the grad of the non-active ones
+                i = torch.ones(self.part_deltas.shape[0], dtype=torch.bool, device="cuda")
+                i[frame_idxs] = 0
+                self.part_deltas.grad[i] = 0.0
+            for frame_idx in frame_idxs:
+                tape = wp.Tape()
+                with tape:
+                    this_obj_delta = self.T_objreg_objinit.view(1, 7)
+                    this_part_deltas = self.part_deltas[frame_idx]
+                    observation = self.sequence[frame_idx]
+                    frame = (
+                        observation.frame
+                        if not self.config.use_roi
+                        else observation.roi_frame
+                    )
+                    loss = self._get_loss(
+                        frame,
+                        this_obj_delta,
+                        this_part_deltas,
+                        self.config.use_depth,
+                        self.config.use_rgb,
+                        self.config.atap_config.use_atap,
+                    )
+
+
+                assert loss is not None
+                loss.backward()
+                tape.backward()  # torch, then tape backward, to propagate gradients to warp kernels.
+
+                # tape backward only propagates up to the slice, so we need to call autograd again to continue.
+                assert this_part_deltas.grad is not None
+                torch.autograd.backward(
+                    [this_part_deltas],
+                    grad_tensors=[this_part_deltas.grad],
                 )
-                loss = self._get_loss(
-                    frame,
-                    this_obj_delta,
-                    this_part_deltas,
-                    self.config.use_depth,
-                    self.config.use_rgb,
-                    self.config.atap_config.use_atap,
-                )
-
-            assert loss is not None
-            loss.backward()
-            tape.backward()  # torch, then tape backward, to propagate gradients to warp kernels.
-
-            # tape backward only propagates up to the slice, so we need to call autograd again to continue.
-            assert this_part_deltas.grad is not None
-            torch.autograd.backward(
-                [this_part_deltas],
-                grad_tensors=[this_part_deltas.grad],
-            )
-
             optimizer.step()
             scheduler.step()
 
+    def get_smoothness_loss(self, deltas: torch.Tensor, position_lambda: float, rotation_lambda: float, active_timesteps = slice(None)):
+        """
+        Returns the smoothness loss for the given deltas
+        """
+        loss = torch.empty(deltas.shape[0], deltas.shape[1], dtype=torch.float32, device="cuda", requires_grad=True)
+        wp.launch(
+            kernel=traj_smoothness_loss_warp,
+            dim=(deltas.shape[0], deltas.shape[1]),
+            inputs=[wp.from_torch(deltas), position_lambda, rotation_lambda],
+            outputs = [wp.from_torch(loss)],
+        )
+        return loss[active_timesteps].sum()
 
     def _try_opt(
         self,

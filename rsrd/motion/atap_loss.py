@@ -12,7 +12,7 @@ from rsrd.util.warp_kernels import atap_loss_warp
 @dataclass
 class ATAPConfig:
     use_atap: bool = True
-    touch_radius: float = 0.005
+    touch_radius: float = 0.002
     N: int = 500
     loss_mult: float = 0.2
     loss_alpha: float = (
