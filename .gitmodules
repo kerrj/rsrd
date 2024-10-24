@@ -4,15 +4,15 @@
 [submodule "dependencies/raftstereo"]
 	path = dependencies/raftstereo
 	url = git@github.com:kerrj/RAFT-Stereo.git
-[submodule "dependencies/jaxfg"]
-	path = dependencies/jaxfg
-	url = git@github.com:brentyi/jaxfg.git
 [submodule "dependencies/dig"]
 	path = dependencies/dig
 	url = https://github.com/kerrj/dig
-[submodule "dependencies/jaxls"]
-	path = dependencies/jaxls
-	url = git@github.com:brentyi/jaxls.git
 [submodule "dependencies/jaxmp"]
 	path = dependencies/jaxmp
 	url = git@github.com:chungmin99/jaxmp.git
+[submodule "jaxls"]
+	path = jaxls
+	url = git@github.com:chungmin99/jaxls.git
+[submodule "dependencies/jaxls"]
+	path = dependencies/jaxls
+	url = git@github.com:chungmin99/jaxls.git
