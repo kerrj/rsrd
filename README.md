@@ -73,6 +73,9 @@ https://github.com/user-attachments/assets/343e0176-975e-4ece-b32e-20815b2053f0
 
 * `keyframes.txt`: a loadable representation of the tracked part poses
 
+### Running the robot visualizer
+**TODO** CMK fill in
+
 ## Bibtex
 If you find this useful, please cite the paper!
 <pre id="codecell0">@inproceedings{kerr2024rsrd,
