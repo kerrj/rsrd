@@ -61,6 +61,7 @@ After the 4D-DPM is completed, the script `scripts/run_tracker.py` executes the 
 * `--save-hand`: if specified will compute hand poses with HaMer, otherwise if `--no-save-hand` will not
 
 After tracking executes you can visualize the 4D reconstruction in a viser window (usually `localhost:8080`), which should look like this!
+
 <img src="assets/4d_viewer.png" width="50%" alt="image">
 
 In addition, the output folder you specified will contain:
@@ -68,10 +69,7 @@ In addition, the output folder you specified will contain:
 * `camopt_render.mp4`: a file showing an animation of the object pose initialization (including all random seeds)
 * `frame_opt.mp4`: an mp4 file showing the rendered object trajectory from the camera perspective, overlaid on top of the video like so:
 
-<video width="50%" controls>
-  <source src="example_output.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+https://github.com/user-attachments/assets/343e0176-975e-4ece-b32e-20815b2053f0
 
 * `keyframes.txt`: a loadable representation of the tracked part poses
 
