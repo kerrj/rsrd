@@ -11,16 +11,17 @@ from loguru import logger
 import trimesh
 import yourdfpy
 
+from jaxmp import JaxKinTree
+from jaxmp.coll import RobotColl, collide, Convex
+from jaxmp.extras.solve_ik import solve_ik
+
 from rsrd.motion.motion_optimizer import RigidGroupOptimizer
 from rsrd.robot.graspable_obj import GraspableObject
-from jaxmp.kinematics import JaxKinTree
-from jaxmp.coll import RobotColl, collide, Convex
-from jaxmp.jaxls.solve_ik import solve_ik
 from rsrd.robot.motion_plan_yumi import YUMI_REST_POSE
 from rsrd.robot.motion_plan_yumi import motion_plan_yumi
 
 solve_ik_vmap = jax.vmap(
-    solve_ik, in_axes=(None, 0, None, None, None, None, None, None, None, None)
+    solve_ik, in_axes=(None, 0, None, None)
 )
 mp_yumi_vmap = jax.vmap(motion_plan_yumi, in_axes=(None, None, 0))
 
@@ -120,6 +121,8 @@ class PartMotionPlanner:
             if len(succ_traj) > 0:
                 in_coll = self.get_self_coll(succ_traj[:, 0, :])
                 succ_traj = succ_traj[~in_coll]
+            else:
+                logger.info("No successful trajectories found.")
 
             if len(succ_traj) > 0:
                 logger.info(f"Found {len(succ_traj)} successful trajectories.")
@@ -138,6 +141,9 @@ class PartMotionPlanner:
             part_idx_0, part_idx_1, joint_idx_0, joint_idx_1, grasp_idx
         ) in self._get_start_cand_bimanual(T_obj_world):
             logger.info(f"Trying part {part_idx_0}, {part_idx_1}, joint {joint_idx_0}, {joint_idx_1}.")
+            if len(grasp_idx) == 0:
+                logger.info("No valid grasps found.")
+
             # Batch the grasps.
             for i in range(0, grasp_idx.shape[0], 500):
                 _grasp_idx = grasp_idx[i : min(i + 500, grasp_idx.shape[0])]
@@ -159,6 +165,8 @@ class PartMotionPlanner:
                 if len(succ_traj) > 0:
                     in_coll = self.get_self_coll(succ_traj[:, 0, :])
                     succ_traj = succ_traj[~in_coll]
+                else:
+                    logger.info("No successful trajectories found.")
 
                 if len(succ_traj) > 0:
                     logger.info(f"Found {len(succ_traj)} successful trajectories.")
@@ -227,12 +235,6 @@ class PartMotionPlanner:
             self.kin,
             T_grasp_world,
             jnp.array([joint_idx]),
-            5.0,
-            1.0,
-            0.01,
-            100.0,
-            0.0,
-            0.0,
             jnp.array(YUMI_REST_POSE),
         )
 

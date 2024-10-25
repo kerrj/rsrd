@@ -16,8 +16,7 @@ import jax
 import jaxlie
 import jax_dataclasses as jdc
 from jax import Array, numpy as jnp
-from jaxmp.kinematics import JaxKinTree
-from jaxmp.jaxls.robot_factors import RobotFactors
+from jaxmp import RobotFactors, JaxKinTree
 import jaxls
 from jaxtyping import Float
 
