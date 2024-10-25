@@ -2,8 +2,9 @@
 Script for running the tracker.
 """
 
+import json
 import trimesh
-from typing import cast
+from typing import Optional, Type, cast
 import time
 from pathlib import Path
 from threading import Lock
@@ -29,6 +30,7 @@ from rsrd.motion.motion_optimizer import (
     RigidGroupOptimizer,
     RigidGroupOptimizerConfig,
 )
+import rsrd.transforms as tf
 from rsrd.motion.atap_loss import ATAPConfig
 from rsrd.extras.cam_helpers import (
     CameraIntr,
@@ -43,14 +45,33 @@ torch.set_float32_matmul_precision("high")
 
 def main(
     is_obj_jointed: bool,
-    dig_config_path: Path,
-    video_path: Path,
     output_dir: Path,
-    camera_type: CameraIntr = IPhoneIntr(),
+    dig_config_path: Optional[Path] = None,
+    video_path: Optional[Path] = None,
+    camera_intr_type: Type[CameraIntr] = IPhoneIntr,
     save_hand: bool = True,
 ):
-    """Track objects in video using RSRD."""
+    """Track objects in video using RSRD.
+
+    If a `cache_info.json` file is found in the output directory,
+    the tracker will load using the cached data + paths and skip tracking.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save the paths to the cache file.
+    if (output_dir / "cache_info.json").exists():
+        cache_data = json.loads((output_dir / "cache_info.json").read_text())
+        video_path = Path(cache_data["video_path"])
+        dig_config_path = Path(cache_data["dig_config_path"])
+    else:
+        cache_data = {
+            "video_path": str(video_path),
+            "dig_config_path": str(dig_config_path),
+        }
+        (output_dir / "cache_info.json").write_text(json.dumps(cache_data))
+    
+    assert dig_config_path is not None, "Must provide a dig config path."
+    assert video_path is not None, "Must provide a video path."
 
     # Load video.
     assert video_path.exists(), f"Video path {video_path} does not exist."
@@ -93,6 +114,7 @@ def main(
     logger.info("Initialized tracker.")
 
     # Generate + load keyframes.
+    camera_type = camera_intr_type()
     camopt_render_path = output_dir / "camopt_render.mp4"
     frame_opt_path = output_dir / "frame_opt.mp4"
     track_data_path = output_dir / "keyframes.txt"
@@ -108,6 +130,14 @@ def main(
         )
 
     optimizer.load_tracks(track_data_path)
+
+    # Load camera and hands info, in the object frame.
+    assert optimizer.T_objreg_objinit is not None
+    T_cam_obj = tf.SE3(optimizer.T_objreg_objinit).inverse()
+    T_cam_obj = (
+        T_cam_obj @
+        tf.SE3.from_rotation(tf.SO3.from_x_radians(torch.Tensor([torch.pi]).cuda()))
+    )
     hands = optimizer.hands_info
     assert hands is not None
 
@@ -119,6 +149,22 @@ def main(
 
     server = viser.ViserServer()
     viser_rsrd = ViserRSRD(server, optimizer, root_node_name="/object")
+
+    camera_handle = server.scene.add_camera_frustum(
+        "camera",
+        fov=70,
+        aspect=1.0,
+        scale=0.1,
+        position=T_cam_obj.translation().detach().cpu().numpy().squeeze(),
+        wxyz=T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze(),
+    )
+    @camera_handle.on_click
+    def _(event: viser.GuiEvent):
+        client = event.client
+        if client is None:
+            return
+        client.camera.position = T_cam_obj.translation().detach().cpu().numpy().squeeze()
+        client.camera.wxyz = T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze()
 
     height, width = camera_type.height, camera_type.width
     aspect = height / width
@@ -203,7 +249,7 @@ def track_and_save_motion(
     # Smooth all frames, together.
     logger.info("Performing temporal smoothing.")
     optimizer.fit(list(range(num_frames)), 50)
-
+    logger.info("Finished temporal smoothing.")
 
     # Create a render for the video.
     for frame_id in tqdm.trange(0, num_frames):
