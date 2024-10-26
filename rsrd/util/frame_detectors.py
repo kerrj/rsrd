@@ -8,8 +8,14 @@ from transformers import (
     Mask2FormerForUniversalSegmentation,
     AutoModelForDepthEstimation,
 )
+from torchvision.transforms.functional import resize
 
-from hamer_helper import HamerHelper, HandOutputsWrtCamera
+try:
+    from hamer_helper import HamerHelper, HandOutputsWrtCamera
+    hamer_not_installed = False
+except ImportError:
+    hamer_not_installed = True
+
 from rsrd.util.common import Future
 
 
@@ -53,6 +59,8 @@ class Hand3DDetector:
         """
         Detects hands in the image and aligns them with the ground truth depth image.
         """
+        if hamer_not_installed:
+            raise ImportError("Hamer is not installed. Please install it or set `--no-save-hand` in the command line.")
         left, right = cast(
             HamerHelper,
             cls.hamer_helper.retrieve()
@@ -77,53 +85,85 @@ class Hand3DDetector:
         num_hands = hand_outputs["verts"].shape[0]
         if num_hands == 0:
             return hand_outputs
+        
+        for i in range(num_hands):
+            rgb, hand_depth, hand_mask = cast(
+                        HamerHelper, cls.hamer_helper.retrieve()
+                    ).render_detection(
+                        hand_outputs,
+                        i,
+                        monodepth.shape[0],
+                        monodepth.shape[1],
+                        focal_length,
+                    )
+            hand_depth = torch.from_numpy(hand_depth).cuda().float()
+            hand_mask = torch.from_numpy(hand_mask).cuda()
+            masked_hand_depth = hand_depth[hand_mask]#this line needs to be before the resize
+            hand_mask = resize(
+                    hand_mask.unsqueeze(0),
+                    (object_mask.shape[0], object_mask.shape[1]),
+                    antialias = True,
+                ).permute(1, 2, 0).bool()
+            object_mask &= ~hand_mask
+            obj_gauss_depth = rendered_scaled_depth[object_mask]
+            obj_global_depth = monodepth[object_mask]
+            
+            # calculate affine that aligns the two
+            scale = obj_gauss_depth.std() / obj_global_depth.std()
+            scaled_global = (monodepth - obj_global_depth.mean()) * scale + obj_gauss_depth.mean()
 
-        # Get shift/scale for matching monodepth to object depth.
-        monodepth_scale = rendered_scaled_depth[object_mask].std() / monodepth[object_mask].std()
-        monodepth_aligned = (
-            monodepth - monodepth[object_mask].mean()
-        ) * monodepth_scale + rendered_scaled_depth[object_mask].mean()
+            scaled_hand = scaled_global[hand_mask]
+            hand_offset = (masked_hand_depth.mean() - scaled_hand.mean()).item()
+            hand_outputs['verts'][i][:, 2] -= hand_offset
+            hand_outputs['keypoints_3d'][i][:, 2] -= hand_offset
+        return hand_outputs
 
-        num_hands = hand_outputs["verts"].shape[0]
-        _hand_outputs = deepcopy(hand_outputs)
-        for hand_idx in range(num_hands):
-            # hands.append(
-            hand_shift = cls._get_aligned_hand_3d_shift(
-                hand_outputs,
-                hand_idx,
-                monodepth_aligned,
-                focal_length,
-            )
-            hand_shift_vec = -np.array([0, 0, hand_shift])
-            _hand_outputs["verts"][hand_idx] = hand_outputs["verts"][hand_idx] + hand_shift_vec
-            _hand_outputs["keypoints_3d"][hand_idx] = hand_outputs["keypoints_3d"][hand_idx] + hand_shift_vec
+        # # Get shift/scale for matching monodepth to object depth.
+        # monodepth_scale = rendered_scaled_depth[object_mask].std() / monodepth[object_mask].std()
+        # monodepth_aligned = (
+        #     monodepth - monodepth[object_mask].mean()
+        # ) * monodepth_scale + rendered_scaled_depth[object_mask].mean()
 
-        return _hand_outputs
+        # num_hands = hand_outputs["verts"].shape[0]
+        # _hand_outputs = deepcopy(hand_outputs)
+        # for hand_idx in range(num_hands):
+        #     # hands.append(
+        #     hand_shift = cls._get_aligned_hand_3d_shift(
+        #         hand_outputs,
+        #         hand_idx,
+        #         monodepth_aligned,
+        #         focal_length,
+        #     )
+        #     hand_shift_vec = -np.array([0, 0, hand_shift])
+        #     _hand_outputs["verts"][hand_idx] = hand_outputs["verts"][hand_idx] + hand_shift_vec
+        #     _hand_outputs["keypoints_3d"][hand_idx] = hand_outputs["keypoints_3d"][hand_idx] + hand_shift_vec
+
+        # return _hand_outputs
     
-    @classmethod
-    def _get_aligned_hand_3d_shift(
-        cls,
-        hand_output: HandOutputsWrtCamera,
-        hand_idx: int,
-        monodepth_aligned: torch.Tensor,
-        focal_length: float,
-    ) -> float:
-        # Get the hand depth.
-        rgb, hand_depth, hand_mask = cast(
-            HamerHelper, cls.hamer_helper.retrieve()
-        ).render_detection(
-            hand_output,
-            hand_idx,
-            monodepth_aligned.shape[0],
-            monodepth_aligned.shape[1],
-            focal_length,
-        )
-        hand_depth = torch.from_numpy(hand_depth).cuda().float()
-        hand_mask = torch.from_numpy(hand_mask).cuda()
+    # @classmethod
+    # def _get_aligned_hand_3d_shift(
+    #     cls,
+    #     hand_output: HandOutputsWrtCamera,
+    #     hand_idx: int,
+    #     monodepth_aligned: torch.Tensor,
+    #     focal_length: float,
+    # ) -> float:
+    #     # Get the hand depth.
+    #     rgb, hand_depth, hand_mask = cast(
+    #         HamerHelper, cls.hamer_helper.retrieve()
+    #     ).render_detection(
+    #         hand_output,
+    #         hand_idx,
+    #         monodepth_aligned.shape[0],
+    #         monodepth_aligned.shape[1],
+    #         focal_length,
+    #     )
+    #     hand_depth = torch.from_numpy(hand_depth).cuda().float()
+    #     hand_mask = torch.from_numpy(hand_mask).cuda()
 
-        # Get shift (no scale!) to match hand depth to monodepth.
-        hand_shift = (hand_depth[hand_mask].mean() - monodepth_aligned[hand_mask].mean()).item()
-        return hand_shift
+    #     # Get shift (no scale!) to match hand depth to monodepth.
+    #     hand_shift = (hand_depth[hand_mask].mean() - monodepth_aligned[hand_mask].mean()).item()
+    #     return hand_shift
 
 
 class MonoDepthEstimator:
