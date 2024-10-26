@@ -1,5 +1,13 @@
-# Robot See Robot Do
+<h1 align="left">
+    <img alt="rsrd logo" src="https://robot-see-robot-do.github.io/data/favicon.png" width="auto" height="30" />
+    Robot See Robot Do
+    <img alt="rsrd logo" src="https://robot-see-robot-do.github.io/data/favicon.png" width="auto" height="30" />
+</h1>
+
 [Project Page](https://robot-see-robot-do.github.io/), [Paper](https://arxiv.org/abs/2409.18121)
+
+- [ ] Try creating environment from scratch.
+- [ ] Make sure the dependencies install correctly
 
 ## Installation
 Clone this repo with `git clone --recursive https://github.com/kerrj/rsrd`, which will clone submodules into `dependencies/`
@@ -9,12 +17,13 @@ First please install PyTorch 2.1.2 in a python 3.10 conda env with cuda version 
 Once these are installed, install [GARField](https://github.com/chungmin99/garfield), which should simply be pip installable except for [cuML](https://docs.rapids.ai/install/), which can be pip installed with 
 `pip install --extra-index-url=https://pypi.nvidia.com cudf-cu12==24.10.* cuml-cu12==24.10.*`
 
-**TODO** cmk add robot dependencies
+Finally, for robot trajectory optimization, install [JAX](https://jax.readthedocs.io/en/latest/installation.html), with GPU if possible; trajectory remapping optimization heavily relies on batch IK + trajectory solves. Please see [`jaxmp`](https://github.com/chungmin99/jaxmp/tree/main) for installation details.
+
+The system was tested with a RTX 4090, with `torch==2.5.0, jax==0.4.35`, but should work for other versions as well.
+
 
 ### Submodule Dependencies
 There are a number of submodules inside the `dependencies/` folder, which can all be pip installed via `pip install -e .`
-
-**TODO** make sure the dependencies install correctly
 
 ### Testing the install
 To catch most install issues, after installation you should be able to run `ns-train garfield -h` and `ns-train dig -h` and see a formatted help output of the two training pipelines.
