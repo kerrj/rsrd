@@ -34,7 +34,7 @@ import rsrd.transforms as tf
 from rsrd.motion.atap_loss import ATAPConfig
 from rsrd.extras.cam_helpers import (
     CameraIntr,
-    IPhoneIntr,IPhoneVerticalIntr,
+    IPhoneIntr,
     get_ns_camera_at_origin,
     get_vid_frame,
 )
@@ -44,11 +44,11 @@ torch.set_float32_matmul_precision("high")
 
 
 def main(
-    is_obj_jointed: bool,
     output_dir: Path,
+    is_obj_jointed: Optional[bool] = None,
     dig_config_path: Optional[Path] = None,
     video_path: Optional[Path] = None,
-    camera_intr_type: Type[CameraIntr] = IPhoneIntr,
+    camera_intr_type: CameraIntr = IPhoneIntr(),
     save_hand: bool = True,
 ):
     """Track objects in video using RSRD.
@@ -61,17 +61,24 @@ def main(
     # Save the paths to the cache file.
     if (output_dir / "cache_info.json").exists():
         cache_data = json.loads((output_dir / "cache_info.json").read_text())
-        video_path = Path(cache_data["video_path"])
-        dig_config_path = Path(cache_data["dig_config_path"])
-    else:
-        cache_data = {
-            "video_path": str(video_path),
-            "dig_config_path": str(dig_config_path),
-        }
-        (output_dir / "cache_info.json").write_text(json.dumps(cache_data))
     
+        if is_obj_jointed is None:
+            is_obj_jointed = bool(cache_data["is_obj_jointed"])
+        if video_path is None:
+            video_path = Path(cache_data["video_path"])
+        if dig_config_path is None:
+            dig_config_path = Path(cache_data["dig_config_path"])
+    
+    assert is_obj_jointed is not None, "Must provide whether the object is jointed."
     assert dig_config_path is not None, "Must provide a dig config path."
     assert video_path is not None, "Must provide a video path."
+
+    cache_data = {
+        "is_obj_jointed": is_obj_jointed,
+        "video_path": str(video_path),
+        "dig_config_path": str(dig_config_path),
+    }
+    (output_dir / "cache_info.json").write_text(json.dumps(cache_data))
 
     # Load video.
     assert video_path.exists(), f"Video path {video_path} does not exist."
@@ -114,7 +121,6 @@ def main(
     logger.info("Initialized tracker.")
 
     # Generate + load keyframes.
-    camera_type = camera_intr_type()
     camopt_render_path = output_dir / "camopt_render.mp4"
     frame_opt_path = output_dir / "frame_opt.mp4"
     track_data_path = output_dir / "keyframes.txt"
@@ -122,7 +128,7 @@ def main(
         track_and_save_motion(
             optimizer,
             video,
-            camera_type,
+            camera_intr_type,
             camopt_render_path,
             frame_opt_path,
             track_data_path,
@@ -133,7 +139,7 @@ def main(
 
     # Load camera and hands info, in the object frame.
     assert optimizer.T_objreg_objinit is not None
-    T_cam_obj = tf.SE3(optimizer.T_objreg_objinit).inverse()
+    T_cam_obj = optimizer.T_objreg_world.inverse()
     T_cam_obj = (
         T_cam_obj @
         tf.SE3.from_rotation(tf.SO3.from_x_radians(torch.Tensor([torch.pi]).cuda()))
@@ -150,6 +156,9 @@ def main(
     server = viser.ViserServer()
     viser_rsrd = ViserRSRD(server, optimizer, root_node_name="/object")
 
+    height, width = camera_intr_type.height, camera_intr_type.width
+    aspect = height / width
+
     camera_handle = server.scene.add_camera_frustum(
         "camera",
         fov=70,
@@ -165,9 +174,6 @@ def main(
             return
         client.camera.position = T_cam_obj.translation().detach().cpu().numpy().squeeze()
         client.camera.wxyz = T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze()
-
-    height, width = camera_type.height, camera_type.width
-    aspect = height / width
 
     timesteps = len(optimizer.part_deltas)
     track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
