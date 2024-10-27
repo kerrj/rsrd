@@ -5,14 +5,11 @@ Turn points to mesh.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, cast
-from jax import Array
 import jax
 import jaxlie
 import numpy as onp
 import jax.numpy as jnp
 import jax_dataclasses as jdc
-from jaxtyping import Float
 import trimesh
 import trimesh.bounds
 from jaxmp.extras.grasp_antipodal import AntipodalGrasps
@@ -44,7 +41,8 @@ class GraspableObject:
         for mask in self.optimizer.group_masks:
             part_points = self.optimizer.init_means[mask].cpu().numpy()
             part_points -= part_points.mean(axis=0)
-            graspable_part = GraspablePart.from_points(part_points)
+            max_width = 0.04 * self.optimizer.dataset_scale
+            graspable_part = GraspablePart.from_points(part_points, max_width)
 
             # We generate grasps at nerfstudio scale, then scale them to world scale.
             graspable_part.mesh.vertices /= self.optimizer.dataset_scale
@@ -172,15 +170,22 @@ class GraspablePart:
     _grasps: AntipodalGrasps
 
     @staticmethod
-    def from_mesh(mesh: trimesh.Trimesh, max_grasps: int = 10) -> GraspablePart:
-        grasps = AntipodalGrasps.from_sample_mesh(mesh, max_samples=100)
+    def from_mesh(mesh: trimesh.Trimesh, max_width: float, max_grasps: int = 10) -> GraspablePart:
+        grasps = AntipodalGrasps.from_sample_mesh(mesh, max_samples=1000, max_width=max_width)
         grasps = jax.tree.map(lambda x: x[:max_grasps], grasps)
+
+        # It's possible there are no grasps, but we need at least one... so we continue bumping up max_width.
+        while len(grasps.centers) == 0:
+            max_width *= 1.2
+            grasps = AntipodalGrasps.from_sample_mesh(mesh, max_samples=1000, max_width=max_width)
+            grasps = jax.tree.map(lambda x: x[:max_grasps], grasps)
+
         return GraspablePart(mesh=mesh, _grasps=grasps)
 
     @staticmethod
-    def from_points(points: onp.ndarray) -> GraspablePart:
+    def from_points(points: onp.ndarray, max_width: float) -> GraspablePart:
         mesh = GraspablePart._points_to_mesh(points)
-        return GraspablePart.from_mesh(mesh)
+        return GraspablePart.from_mesh(mesh, max_width)
 
     @staticmethod
     def _points_to_mesh(points: onp.ndarray) -> trimesh.Trimesh:

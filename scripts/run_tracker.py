@@ -3,8 +3,7 @@ Script for running the tracker.
 """
 
 import json
-import trimesh
-from typing import Optional, Type, cast
+from typing import Optional, cast
 import time
 from pathlib import Path
 from threading import Lock
@@ -154,15 +153,17 @@ def main(
     pipeline.reset_colors()
 
     server = viser.ViserServer()
-    viser_rsrd = ViserRSRD(server, optimizer, root_node_name="/object")
+    viser_rsrd = ViserRSRD(
+        server, optimizer, root_node_name="/object", show_finger_keypoints=False
+    )
 
     height, width = camera_intr_type.height, camera_intr_type.width
     aspect = height / width
 
     camera_handle = server.scene.add_camera_frustum(
         "camera",
-        fov=70,
-        aspect=1.0,
+        fov=80,
+        aspect=width / height,
         scale=0.1,
         position=T_cam_obj.translation().detach().cpu().numpy().squeeze(),
         wxyz=T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze(),
@@ -243,7 +244,12 @@ def track_and_save_motion(
     # Add each frame, optimize them separately.
     renders = []
     for frame_id in tqdm.trange(0, num_frames):
-        rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
+        try:
+            rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
+        except ValueError:
+            num_frames = frame_id
+            break
+
         obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
         optimizer.add_observation(obs)
         optimizer.fit([frame_id], 50)
