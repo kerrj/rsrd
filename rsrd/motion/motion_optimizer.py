@@ -188,6 +188,7 @@ class RigidGroupOptimizer:
         # Don't use ROI for this step.
         best_pose, best_loss = identity_7vec(), float("inf")
         obj_centroid = self.dig_model.means.mean(dim=0, keepdim=True)  # 1x3
+        frame_rgb = (first_obs.frame.rgb.cpu().numpy()*255).astype(np.uint8)
         for z_rot in tqdm(np.linspace(0, np.pi * 2, n_seeds), "Trying seeds..."):
             candidate_pose = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
             candidate_pose[:, :4] = (
@@ -207,6 +208,8 @@ class RigidGroupOptimizer:
             loss, final_pose, rend = self._try_opt(
                 candidate_pose, first_obs.frame, niter, use_depth, render=render
             )
+            # composite the render on top of the frame
+            rend = [0.6*r + 0.4*frame_rgb for r in rend]
             renders.extend(rend)
 
             if loss is not None and loss < best_loss:

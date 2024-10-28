@@ -182,7 +182,7 @@ def track_and_save_motion(
     obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
 
     # Initialize.
-    renders = optimizer.initialize_obj_pose(obs, render=True, niter=100, n_seeds=5)
+    renders = optimizer.initialize_obj_pose(obs, render=True, niter=150, n_seeds=6)
 
     # Save the frames.
     out_clip = mpy.ImageSequenceClip(renders, fps=30)
