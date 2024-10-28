@@ -75,6 +75,7 @@ def main(
 
     try:
         pipeline.load_state()
+        pipeline.reset_colors()
     except FileNotFoundError:
         print("No state found, starting from scratch")
 
@@ -115,7 +116,6 @@ def main(
 
     # Before visualizing, reset colors...
     optimizer.reset_transforms()
-    pipeline.reset_colors()
 
     server = viser.ViserServer()
     viser_rsrd = ViserRSRD(server, optimizer, root_node_name="/object")
