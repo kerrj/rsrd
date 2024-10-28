@@ -186,7 +186,8 @@ def track_and_save_motion(
 
     # Save the frames.
     out_clip = mpy.ImageSequenceClip(renders, fps=30)
-    out_clip.write_videofile(str(camopt_render_path))
+    out_clip.write_videofile(str(camopt_render_path), codec="libx264",bitrate='5000k')
+    out_clip.write_videofile(str(camopt_render_path).replace('.mp4','_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
 
     # Add each frame, optimize them separately.
     renders = []
@@ -224,7 +225,8 @@ def track_and_save_motion(
 
     # Save the frames.
     out_clip = mpy.ImageSequenceClip(renders, fps=30)
-    out_clip.write_videofile(str(frame_opt_path))
+    out_clip.write_videofile(str(frame_opt_path), codec="libx264",bitrate='5000k')
+    out_clip.write_videofile(str(frame_opt_path).replace('.mp4','_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
 
 
 if __name__ == "__main__":
