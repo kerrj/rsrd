@@ -102,6 +102,7 @@ def main(
 
     try:
         pipeline.load_state()
+        pipeline.reset_colors()
     except FileNotFoundError:
         print("No state found, starting from scratch")
 
@@ -150,7 +151,6 @@ def main(
 
     # Before visualizing, reset colors...
     optimizer.reset_transforms()
-    pipeline.reset_colors()
 
     server = viser.ViserServer()
     viser_rsrd = ViserRSRD(
@@ -216,6 +216,27 @@ def main(
             time.sleep(1/30)
 
 
+def render_video(
+    optimizer: RigidGroupOptimizer,
+    motion_clip: cv2.VideoCapture,
+    num_frames: int
+):
+    renders = []
+    # Create a render for the video.
+    for frame_id in tqdm.trange(0, num_frames):
+        rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
+        optimizer.apply_keyframe(frame_id)
+        with torch.no_grad():
+            outputs = cast(
+                dict[str, torch.Tensor],
+                optimizer.dig_model.get_outputs(optimizer.sequence[frame_id].frame.camera)
+            )
+        render = (outputs["rgb"].cpu() * 255).numpy().astype(np.uint8)
+        rgb = cv2.resize(rgb, (render.shape[1], render.shape[0]))
+        render = (render * 0.8 + rgb * 0.2).astype(np.uint8)
+        renders.append(render)
+    return renders
+    
 
 # But this should _really_ be in the rigid optimizer.
 def track_and_save_motion(
@@ -235,11 +256,12 @@ def track_and_save_motion(
     obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
 
     # Initialize.
-    renders = optimizer.initialize_obj_pose(obs, render=True, niter=100, n_seeds=5)
+    renders = optimizer.initialize_obj_pose(obs, render=True, niter=150, n_seeds=6)
 
     # Save the frames.
     out_clip = mpy.ImageSequenceClip(renders, fps=30)
-    out_clip.write_videofile(str(camopt_render_path))
+    out_clip.write_videofile(str(camopt_render_path), codec="libx264",bitrate='5000k')
+    out_clip.write_videofile(str(camopt_render_path).replace('.mp4','_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
 
     # Add each frame, optimize them separately.
     renders = []
@@ -258,31 +280,26 @@ def track_and_save_motion(
 
         if save_hand:
             optimizer.detect_hands(frame_id)
+    
+    # Save a pre-smoothing video
+    renders = render_video(optimizer, motion_clip, num_frames)
+    out_clip = mpy.ImageSequenceClip(renders, fps=30)
+    out_clip.write_videofile(str(frame_opt_path).replace(".mp4","_pre_smooth.mp4"), codec="libx264",bitrate='5000k')
+    out_clip.write_videofile(str(frame_opt_path).replace('.mp4','_pre_smooth_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
+    
     # Smooth all frames, together.
-    logger.info("Performing temporal smoothing.")
+    logger.info("Performing temporal smoothing...")
     optimizer.fit(list(range(num_frames)), 50)
     logger.info("Finished temporal smoothing.")
-
-    # Create a render for the video.
-    for frame_id in tqdm.trange(0, num_frames):
-        rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
-        optimizer.apply_keyframe(frame_id)
-        with torch.no_grad():
-            outputs = cast(
-                dict[str, torch.Tensor],
-                optimizer.dig_model.get_outputs(optimizer.sequence[frame_id].frame.camera)
-            )
-        render = (outputs["rgb"].cpu() * 255).numpy().astype(np.uint8)
-        rgb = cv2.resize(rgb, (render.shape[1], render.shape[0]))
-        render = (render * 0.8 + rgb * 0.2).astype(np.uint8)
-        renders.append(render)
 
     # Save part trajectories.
     optimizer.save_tracks(track_data_path)
 
-    # Save the frames.
+    renders = render_video(optimizer, motion_clip, num_frames)
+    # Save the final video
     out_clip = mpy.ImageSequenceClip(renders, fps=30)
-    out_clip.write_videofile(str(frame_opt_path))
+    out_clip.write_videofile(str(frame_opt_path), codec="libx264",bitrate='5000k')
+    out_clip.write_videofile(str(frame_opt_path).replace('.mp4','_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
 
 
 if __name__ == "__main__":
