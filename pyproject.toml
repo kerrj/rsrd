@@ -5,9 +5,10 @@ version = "0.0.1"
 dependencies=[
     "nerfstudio",
     "hamer",
-    "loguru"
+    "loguru",
     "torch",  # gpu
-    "jax",  # cpu
+    "jax",  # gpu
+    "kornia",
 ]
 
 # need python3.12 (for jaxls)

@@ -4,9 +4,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any, List, Optional, Tuple, cast, Union
+from typing import Any, List, Optional, Tuple, cast, Union, TYPE_CHECKING
 
-from hamer_helper import HandOutputsWrtCamera
 import kornia
 import numpy as np
 import torch
@@ -33,6 +32,11 @@ from rsrd.motion.atap_loss import ATAPLoss, ATAPConfig
 from rsrd.motion.observation import PosedObservation, VideoSequence, Frame
 from rsrd.util.warp_kernels import apply_to_model_warp, traj_smoothness_loss_warp
 from rsrd.util.common import identity_7vec, extrapolate_poses, mnn_matcher
+
+try:
+    from hamer_helper import HandOutputsWrtCamera
+except ModuleNotFoundError:
+    HandOutputsWrtCamera = None
 
 @dataclass
 class RigidGroupOptimizerConfig:
@@ -78,7 +82,7 @@ class RigidGroupOptimizer:
     - from: `objinit`, in original frame from which it was scanned
     """
 
-    hands_info: dict[int, tuple[HandOutputsWrtCamera | None, HandOutputsWrtCamera | None]]
+    hands_info: dict[int, tuple[Optional[HandOutputsWrtCamera], Optional[HandOutputsWrtCamera]]]
 
     def __init__(
         self,
@@ -583,7 +587,7 @@ class RigidGroupOptimizer:
         self,
         path: Path,
         hands: Optional[
-            dict[int, tuple[HandOutputsWrtCamera | None, HandOutputsWrtCamera | None]]
+            dict[int, tuple[Optional[HandOutputsWrtCamera], Optional[HandOutputsWrtCamera]]]
         ] = None,
     ):
         """

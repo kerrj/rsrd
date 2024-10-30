@@ -1,6 +1,6 @@
 from copy import deepcopy
 import torch
-from typing import Union, cast
+from typing import Union, cast, Optional
 import numpy as np
 from PIL import Image
 from transformers import (
@@ -14,6 +14,7 @@ try:
     from hamer_helper import HamerHelper, HandOutputsWrtCamera
     hamer_not_installed = False
 except ImportError:
+    HamerHelper, HandOutputsWrtCamera = None, None
     hamer_not_installed = True
 
 from rsrd.util.common import Future
@@ -55,7 +56,7 @@ class Hand3DDetector:
     @classmethod
     def detect_hands(
         cls, image: torch.Tensor, focal: float
-    ) -> tuple[HandOutputsWrtCamera | None, HandOutputsWrtCamera | None]:
+    ) -> tuple[Optional[HandOutputsWrtCamera], Optional[HandOutputsWrtCamera]]:
         """
         Detects hands in the image and aligns them with the ground truth depth image.
         """
@@ -73,12 +74,12 @@ class Hand3DDetector:
     @classmethod
     def get_aligned_hands_3d(
         cls, 
-        hand_outputs: HandOutputsWrtCamera | None,  
+        hand_outputs: Optional[HandOutputsWrtCamera],  
         monodepth: torch.Tensor, 
         object_mask: torch.Tensor, 
         rendered_scaled_depth: torch.Tensor, 
         focal_length: float
-    ) -> HandOutputsWrtCamera | None:
+    ) -> Optional[HandOutputsWrtCamera]:
         if hand_outputs is None:
             return None
 
