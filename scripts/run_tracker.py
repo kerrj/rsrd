@@ -2,8 +2,8 @@
 Script for running the tracker.
 """
 
-import trimesh
-from typing import cast
+import json
+from typing import Optional, cast
 import time
 from pathlib import Path
 from threading import Lock
@@ -29,10 +29,11 @@ from rsrd.motion.motion_optimizer import (
     RigidGroupOptimizer,
     RigidGroupOptimizerConfig,
 )
+import rsrd.transforms as tf
 from rsrd.motion.atap_loss import ATAPConfig
 from rsrd.extras.cam_helpers import (
     CameraIntr,
-    IPhoneIntr,IPhoneVerticalIntr,
+    IPhoneIntr,
     get_ns_camera_at_origin,
     get_vid_frame,
 )
@@ -42,15 +43,41 @@ torch.set_float32_matmul_precision("high")
 
 
 def main(
-    is_obj_jointed: bool,
-    dig_config_path: Path,
-    video_path: Path,
     output_dir: Path,
-    camera_type: CameraIntr = IPhoneIntr(),
+    is_obj_jointed: Optional[bool] = None,
+    dig_config_path: Optional[Path] = None,
+    video_path: Optional[Path] = None,
+    camera_intr_type: CameraIntr = IPhoneIntr(),
     save_hand: bool = True,
 ):
-    """Track objects in video using RSRD."""
+    """Track objects in video using RSRD.
+
+    If a `cache_info.json` file is found in the output directory,
+    the tracker will load using the cached data + paths and skip tracking.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save the paths to the cache file.
+    if (output_dir / "cache_info.json").exists():
+        cache_data = json.loads((output_dir / "cache_info.json").read_text())
+    
+        if is_obj_jointed is None:
+            is_obj_jointed = bool(cache_data["is_obj_jointed"])
+        if video_path is None:
+            video_path = Path(cache_data["video_path"])
+        if dig_config_path is None:
+            dig_config_path = Path(cache_data["dig_config_path"])
+    
+    assert is_obj_jointed is not None, "Must provide whether the object is jointed."
+    assert dig_config_path is not None, "Must provide a dig config path."
+    assert video_path is not None, "Must provide a video path."
+
+    cache_data = {
+        "is_obj_jointed": is_obj_jointed,
+        "video_path": str(video_path),
+        "dig_config_path": str(dig_config_path),
+    }
+    (output_dir / "cache_info.json").write_text(json.dumps(cache_data))
 
     # Load video.
     assert video_path.exists(), f"Video path {video_path} does not exist."
@@ -101,7 +128,7 @@ def main(
         track_and_save_motion(
             optimizer,
             video,
-            camera_type,
+            camera_intr_type,
             camopt_render_path,
             frame_opt_path,
             track_data_path,
@@ -109,6 +136,14 @@ def main(
         )
 
     optimizer.load_tracks(track_data_path)
+
+    # Load camera and hands info, in the object frame.
+    assert optimizer.T_objreg_objinit is not None
+    T_cam_obj = optimizer.T_objreg_world.inverse()
+    T_cam_obj = (
+        T_cam_obj @
+        tf.SE3.from_rotation(tf.SO3.from_x_radians(torch.Tensor([torch.pi]).cuda()))
+    )
     hands = optimizer.hands_info
     assert hands is not None
 
@@ -118,10 +153,28 @@ def main(
     optimizer.reset_transforms()
 
     server = viser.ViserServer()
-    viser_rsrd = ViserRSRD(server, optimizer, root_node_name="/object")
+    viser_rsrd = ViserRSRD(
+        server, optimizer, root_node_name="/object", show_finger_keypoints=False
+    )
 
-    height, width = camera_type.height, camera_type.width
+    height, width = camera_intr_type.height, camera_intr_type.width
     aspect = height / width
+
+    camera_handle = server.scene.add_camera_frustum(
+        "camera",
+        fov=80,
+        aspect=width / height,
+        scale=0.1,
+        position=T_cam_obj.translation().detach().cpu().numpy().squeeze(),
+        wxyz=T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze(),
+    )
+    @camera_handle.on_click
+    def _(event: viser.GuiEvent):
+        client = event.client
+        if client is None:
+            return
+        client.camera.position = T_cam_obj.translation().detach().cpu().numpy().squeeze()
+        client.camera.wxyz = T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze()
 
     timesteps = len(optimizer.part_deltas)
     track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
@@ -213,7 +266,12 @@ def track_and_save_motion(
     # Add each frame, optimize them separately.
     renders = []
     for frame_id in tqdm.trange(0, num_frames):
-        rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
+        try:
+            rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
+        except ValueError:
+            num_frames = frame_id
+            break
+
         obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
         optimizer.add_observation(obs)
         optimizer.fit([frame_id], 50)
@@ -232,7 +290,7 @@ def track_and_save_motion(
     # Smooth all frames, together.
     logger.info("Performing temporal smoothing...")
     optimizer.fit(list(range(num_frames)), 50)
-
+    logger.info("Finished temporal smoothing.")
 
     # Save part trajectories.
     optimizer.save_tracks(track_data_path)

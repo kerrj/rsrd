@@ -159,7 +159,7 @@ class Zed():
         depth_threshold: float = 1.0,
         subsample: int = 4,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Deproject RGBD image to point cloud, using provided intrinsics.
+        """Deproject RGBD image to point cloud (points, colors), using provided intrinsics.
         Also threshold/subsample pointcloud for visualization speed."""
 
         img_wh = rgb.shape[:2][::-1]
