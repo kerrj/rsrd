@@ -1,377 +1,306 @@
-import torch
-import matplotlib.pyplot as plt
-from nerfstudio.utils.eval_utils import eval_setup
-from pathlib import Path
-import numpy as np
-from nerfstudio.viewer.viewer import Viewer
-from nerfstudio.configs.base_config import ViewerConfig
-import cv2
-from torchvision.transforms import ToTensor,ToPILImage
-from PIL import Image
-from nerfstudio.utils import writer
+"""
+Script for running the tracker.
+"""
+
+import json
+from typing import Optional, cast
 import time
+from pathlib import Path
 from threading import Lock
-from nerfstudio.cameras.cameras import Cameras
-from copy import deepcopy
-from typing import Tuple,Optional,List,Literal
-from torchvision.transforms.functional import resize
-from toad.zed import Zed
-import warp as wp
-from toad.optimization.rigid_group_optimizer import RigidGroupOptimizer,RigidGroupOptimizerConfig
-from toad.optimization.atap_loss import ATAPLoss
-from toad.utils import *
-from toad.hand_registration import HandRegistration
-from toad.optimization.observation import PosedObservation
-import moviepy.editor as mpy
-import tqdm
 import moviepy.editor as mpy
 import plotly.express as px
+
+import cv2
+import numpy as np
+import torch
+import tqdm
+import warp as wp
+
 import viser
-import trimesh
 import tyro
-from dataclasses import dataclass
-import datetime
-from viser import transforms as vtf
+from loguru import logger
 
-def animate_traj(optimizer:RigidGroupOptimizer, output_path: Optional[Path] = None, loop_animation = True):
-    from viser import ViserServer
-    gs_viser = ViserServer()
-    optimizer.reset_transforms()
-    dig_model = optimizer.dig_model
-    Rs = vtf.SO3(dig_model.quats.cpu().numpy()).as_matrix()
-    covariances = np.einsum(
-        "nij,njk,nlk->nil", Rs, np.eye(3)[None, :, :] * dig_model.scales.detach().exp().cpu().numpy()[:, None, :] ** 2, Rs
+from nerfstudio.configs.base_config import ViewerConfig
+from nerfstudio.utils import writer
+from nerfstudio.utils.eval_utils import eval_setup
+from nerfstudio.viewer.viewer import Viewer
+
+from rsrd.motion.motion_optimizer import (
+    RigidGroupOptimizer,
+    RigidGroupOptimizerConfig,
+)
+import rsrd.transforms as tf
+from rsrd.motion.atap_loss import ATAPConfig
+from rsrd.extras.cam_helpers import (
+    CameraIntr,
+    IPhoneIntr,
+    get_ns_camera_at_origin,
+    get_vid_frame,
+)
+from rsrd.extras.viser_rsrd import ViserRSRD
+
+torch.set_float32_matmul_precision("high")
+
+
+def main(
+    output_dir: Path,
+    is_obj_jointed: Optional[bool] = None,
+    dig_config_path: Optional[Path] = None,
+    video_path: Optional[Path] = None,
+    camera_intr_type: CameraIntr = IPhoneIntr(),
+    save_hand: bool = True,
+):
+    """Track objects in video using RSRD.
+
+    If a `cache_info.json` file is found in the output directory,
+    the tracker will load using the cached data + paths and skip tracking.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save the paths to the cache file.
+    if (output_dir / "cache_info.json").exists():
+        cache_data = json.loads((output_dir / "cache_info.json").read_text())
+    
+        if is_obj_jointed is None:
+            is_obj_jointed = bool(cache_data["is_obj_jointed"])
+        if video_path is None:
+            video_path = Path(cache_data["video_path"])
+        if dig_config_path is None:
+            dig_config_path = Path(cache_data["dig_config_path"])
+    
+    assert is_obj_jointed is not None, "Must provide whether the object is jointed."
+    assert dig_config_path is not None, "Must provide a dig config path."
+    assert video_path is not None, "Must provide a video path."
+
+    cache_data = {
+        "is_obj_jointed": is_obj_jointed,
+        "video_path": str(video_path),
+        "dig_config_path": str(dig_config_path),
+    }
+    (output_dir / "cache_info.json").write_text(json.dumps(cache_data))
+
+    # Load video.
+    assert video_path.exists(), f"Video path {video_path} does not exist."
+    video = cv2.VideoCapture(str(video_path.absolute()))
+
+    # Load DIG model, create viewer.
+    train_config, pipeline, _, _ = eval_setup(dig_config_path)
+    del pipeline.garfield_pipeline
+    pipeline.eval()
+    viewer_lock = Lock()
+    Viewer(
+        ViewerConfig(default_composite_depth=False, num_rays_per_chunk=-1),
+        dig_config_path.parent,
+        pipeline.datamanager.get_datapath(),
+        pipeline,
+        train_lock=viewer_lock,
     )
-    rec = gs_viser._start_scene_recording()
-    gs_viser.scene.world_axes.remove()
-    p = optimizer.obj_delta[0,0].detach().cpu().numpy()
-    init_obj_se3 = vtf.SE3.from_rotation_and_translation(vtf.SO3(p[3:]),p[:3])
-    obj_frame = gs_viser.scene.add_frame("/object",show_axes=True, axes_length=.1,axes_radius=.01)
-    delta_frames = []
-    for i in range(optimizer.part_deltas.shape[1]):
-        p2o_7vec = optimizer.init_p2o_7vec[i].cpu().numpy()
-        gs_viser.scene.add_frame(f"/object/part{i}",position=p2o_7vec[:3],wxyz=p2o_7vec[3:],show_axes=False)
-        frame = gs_viser.scene.add_frame(f"/object/part{i}/delta",show_axes=True,axes_length=.1,axes_radius=.005)
-        delta_frames.append(frame)
-        group_mask = optimizer.group_masks[i].cpu().numpy()
-        shifted_centers = dig_model.means.detach()[group_mask]-dig_model.means.detach()[group_mask].mean(dim=0)
-        gs_viser.scene._add_gaussian_splats(
-                f"/object/part{i}/delta/gaussians",
-                centers=shifted_centers.cpu().numpy(),
-                rgbs=torch.clamp(dig_model.colors, 0.0, 1.0).detach()[group_mask].cpu().numpy(),
-                opacities=dig_model.opacities.sigmoid().detach()[group_mask].cpu().numpy(),
-                covariances=covariances[group_mask],
-            )
-    rec.set_loop_start()
-    for t in range(optimizer.part_deltas.shape[0]):
-        for i in range(optimizer.part_deltas.shape[1]):
-            p = optimizer.obj_delta[t,0].detach().cpu().numpy()
-            obj_delta = init_obj_se3.inverse() @ vtf.SE3.from_rotation_and_translation(vtf.SO3(p[3:]),p[:3])
-            delta = optimizer.part_deltas[t,i].detach().cpu().numpy()
-            with gs_viser.atomic():
-                obj_frame.wxyz = obj_delta.rotation().wxyz
-                obj_frame.position = obj_delta.translation()
-                delta_frames[i].position = delta[:3]
-                delta_frames[i].wxyz = delta[3:]
-        rec.insert_sleep(1/30)
-    bs = rec.end_and_serialize()
-    if output_path is not None:
-        (output_path/"animation.viser").write_bytes(bs)
-    animate_button = gs_viser.gui.add_button("Download Animation")
-    @animate_button.on_click
-    def _(_):
-        gs_viser.send_file_download("animation.viser",bs)
-    while loop_animation:
-        for t in range(optimizer.part_deltas.shape[0]):
-            for i in range(optimizer.part_deltas.shape[1]):
-                p = optimizer.obj_delta[t,0].detach().cpu().numpy()
-                obj_delta = init_obj_se3.inverse() @ vtf.SE3.from_rotation_and_translation(vtf.SO3(p[3:]),p[:3])
-                delta = optimizer.part_deltas[t,i].detach().cpu().numpy()
-                with gs_viser.atomic():
-                    obj_frame.wxyz = obj_delta.rotation().wxyz
-                    obj_frame.position = obj_delta.translation()
-                    delta_frames[i].position = delta[:3]
-                    delta_frames[i].wxyz = delta[3:]
-            time.sleep(1/30)
-        time.sleep(.5)
+    # Need to set up the writer to track number of rays, otherwise the viewer will not calculate the resolution correctly.
+    writer.setup_local_writer(
+        train_config.logging, max_iter=train_config.max_num_iterations
+    )
 
-def get_hands(handreg, frame, framedepth, optimizer, outputs, camera: Cameras,viser_server) -> Tuple[Optional[List[trimesh.Trimesh]],Optional[List[trimesh.Trimesh]]]:
-    left_hand,right_hand = handreg.detect_hands(frame,camera.fx.item()*(max(frame.shape[0],frame.shape[1])/PosedObservation.rasterize_resolution))
-    for i,hands in enumerate([left_hand,right_hand]):
-        if hands is None:continue
-        hands['trimeshes'] = []
-        #Compute hand shift to align with gaussians
-        #resize framedepth to the same size as the rendered frame
-        framedepth = resize(
-                    framedepth.permute(2, 0, 1),
-                    (outputs['rgb'].shape[0], outputs['rgb'].shape[1]),
-                    antialias = True,
-                ).permute(1, 2, 0)
-        handreg.align_hands(hands,outputs['depth'].detach()/optimizer.dataset_scale, framedepth, outputs['accumulation'].detach()>.8,camera.fx.item())
-        # visualize result
-        for j in range(hands['verts'].shape[0]):
-            vertices = hands['verts'][j]
-            faces = hands['faces']
-            mesh = trimesh.Trimesh(vertices, faces)
-            cam_pose = torch.eye(4)
-            cam_pose[:3,:] = camera.camera_to_worlds
-            cam_pose[1:3,:] *= -1
-            mesh.apply_transform(cam_pose.cpu().numpy())
-
-            mesh.vertices = mesh.vertices*optimizer.dataset_scale
-            viser_server.add_mesh_trimesh(f"hand{i}_{j}",mesh,scale=10)
-            hands['trimeshes'].append(mesh)
-    return [] if left_hand is None else left_hand['trimeshes'],[] if right_hand is None else right_hand['trimeshes']
-
-def get_vid_frame(cap,timestamp):
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    
-    # Calculate the frame number based on the timestamp and fps
-    frame_number = min(int(timestamp * fps),int(cap.get(cv2.CAP_PROP_FRAME_COUNT)-1))
-    
-    # Set the video position to the calculated frame number
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-    
-    # Read the frame
-    success, frame = cap.read()
-    # convert BGR to RGB
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return frame
-
-@dataclass
-class ExperimentConfig:
-    load_keyframes: bool = False
-    camera_input: Literal['iphone_vertical','iphone','gopro','mx_iphone'] = 'iphone'
-    video_file: Path = Path("motion_vids/buddha_empty_back.MOV")
-    time_bounds: Tuple[float,float] = (0,.2)
-    fps: int = 30
-    dig_config: Path = Path("outputs/buddha_empty/dig/2024-07-03_195352/config.yml")#vit-l with 64 dim
-    # Path("outputs/sunglasses3/dig/2024-07-03_225001/config.yml")#vit-l with 64 dim
-    # Path("outputs/articulated_objects/dig/2024-07-15_205720/config.yml")
-    # Path("outputs/nerfgun_poly_far/dig/2024-07-03_211551/config.yml")#vit-l with 64 dim
-    # dig_config = Path("outputs/purple_flower/dig/2024-07-03_200636/config.yml")#vit-l with 64 dim
-    # dig_config = Path("outputs/lens_cleaner/dig/2024-07-04_183148/config.yml")
-    # dig_config = Path("outputs/left_shoe/dig/2024-07-08_211329/config.yml")
-    base_output_folder: Path = Path("renders/new_corl_exps")
-    output_name: Optional[str] = None
-    """Stores the output experiment name, otherwise set to current datetime plus data name"""
-    detect_hands: bool = False
-    optimizer_config: RigidGroupOptimizerConfig = RigidGroupOptimizerConfig()
-    terminate: bool = False
-    """If true, the program will terminate after the optimization is finished"""
-    
-    @property
-    def output_folder(self):
-        return self.base_output_folder / self.output_name
-    
-    def __post_init__(self):
-        assert self.video_file.exists()
-        assert self.time_bounds[0] < self.time_bounds[1]
-        if self.output_name is None:
-            # search for the folder name before 'dig'
-            id_end = str(self.dig_config).find("/dig/")
-            id_start = str(self.dig_config).rfind("/",0,id_end)
-            data_name = str(self.dig_config)[id_start+1:id_end]
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            self.output_name = f"{data_name}_{timestamp}"
-
-def main(exp: ExperimentConfig):
-    exp.output_folder.mkdir(exist_ok=True,parents=True)
-    train_config,pipeline,_,_ = eval_setup(exp.dig_config)
-
-    dino_loader = pipeline.datamanager.dino_dataloader
-    train_config.logging.local_writer.enable = False
-    # We need to set up the writer to track number of rays, otherwise the viewer will not calculate the resolution correctly
-    writer.setup_local_writer(train_config.logging, max_iter=train_config.max_num_iterations)
-    v = Viewer(ViewerConfig(default_composite_depth=False,num_rays_per_chunk=-1),exp.dig_config.parent,pipeline.datamanager.get_datapath(),pipeline,train_lock=Lock())
     try:
         pipeline.load_state()
         pipeline.reset_colors()
     except FileNotFoundError:
         print("No state found, starting from scratch")
-    if exp.detect_hands:
-        handreg = HandRegistration()
 
+    # Initialize tracker.
+    wp.init()  # Must be called before any other warp API call.
+    optimizer_config = RigidGroupOptimizerConfig(
+        atap_config=ATAPConfig(
+            loss_alpha=(1.0 if is_obj_jointed else 0.1),
+        )
+    )
+    optimizer = RigidGroupOptimizer(
+        optimizer_config,
+        pipeline,
+        render_lock=viewer_lock,
+    )
+    logger.info("Initialized tracker.")
 
-    """
-    INITIALIZE THE VIDEO and camera intrinsics
-    """
+    # Generate + load keyframes.
+    camopt_render_path = output_dir / "camopt_render.mp4"
+    frame_opt_path = output_dir / "frame_opt.mp4"
+    track_data_path = output_dir / "keyframes.txt"
+    if not track_data_path.exists():
+        track_and_save_motion(
+            optimizer,
+            video,
+            camera_intr_type,
+            camopt_render_path,
+            frame_opt_path,
+            track_data_path,
+            save_hand,
+        )
 
-    cam_pose = None
-    if cam_pose is None:
-        H = np.eye(4)
-        H[:3,:3] = vtf.SO3.from_x_radians(np.pi/4).as_matrix()
-        cam_pose = torch.from_numpy(H).float()[None,:3,:]
-    if exp.camera_input == 'iphone':
-        init_cam = Cameras(camera_to_worlds=cam_pose,fx = 1137.0,fy = 1137.0,cx = 1280.0/2,cy = 720/2,width=1280,height=720)
-        init_cam.rescale_output_resolution(1920/1280)
-    elif exp.camera_input == 'mx_iphone':
-        init_cam = Cameras(camera_to_worlds=cam_pose,fx = 1085.,fy = 1085.,cx = 644.,cy = 361.,width=1280,height=720)
-        # init_cam.rescale_output_resolution(1920/1280)
-        # init_cam = Cameras(camera_to_worlds=cam_pose,fx = 884.72,fy = 884.72,cx = 955.7,cy = 534.2,width=1920,height=1080)
-    elif exp.camera_input == 'iphone_vertical':
-        init_cam = Cameras(camera_to_worlds=cam_pose,fy = 1137.0,fx = 1137.0,cy = 1280/2,cx = 720/2,height=1280,width=720)
-        init_cam.rescale_output_resolution(1920/1280)
-    elif exp.camera_input == 'gopro':
-        init_cam = Cameras(camera_to_worlds=cam_pose,fx = 2.55739580e+03,fy = 2.55739580e+03,cx = 1.92065792e+03,cy = 1.07274675e+03,width=3840,height=2160)
-    else:
-        raise ValueError("Unknown camera type")
+    optimizer.load_tracks(track_data_path)
+
+    # Load camera and hands info, in the object frame.
+    assert optimizer.T_objreg_objinit is not None
+    T_cam_obj = optimizer.T_objreg_world.inverse()
+    T_cam_obj = (
+        T_cam_obj @
+        tf.SE3.from_rotation(tf.SO3.from_x_radians(torch.Tensor([torch.pi]).cuda()))
+    )
+    hands = optimizer.hands_info
+    assert hands is not None
+
+    overlay_video = cv2.VideoCapture(str(frame_opt_path))
+
+    # Before visualizing, reset colors...
+    optimizer.reset_transforms()
+
+    server = viser.ViserServer()
+    viser_rsrd = ViserRSRD(
+        server, optimizer, root_node_name="/object", show_finger_keypoints=False
+    )
+
+    height, width = camera_intr_type.height, camera_intr_type.width
+    aspect = height / width
+
+    camera_handle = server.scene.add_camera_frustum(
+        "camera",
+        fov=80,
+        aspect=width / height,
+        scale=0.1,
+        position=T_cam_obj.translation().detach().cpu().numpy().squeeze(),
+        wxyz=T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze(),
+    )
+    @camera_handle.on_click
+    def _(event: viser.GuiEvent):
+        client = event.client
+        if client is None:
+            return
+        client.camera.position = T_cam_obj.translation().detach().cpu().numpy().squeeze()
+        client.camera.wxyz = T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze()
+
+    timesteps = len(optimizer.part_deltas)
+    track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
+    play_checkbox = server.gui.add_checkbox("play", True)
+    show_overlay_checkbox = server.gui.add_checkbox("Show Demo Vid (slow)", False)
     
-    if pipeline.cluster_labels is not None:
-        labels = pipeline.cluster_labels.int().cuda()
-        group_masks = [(cid == labels).cuda() for cid in range(labels.max() + 1)]
-    else:
-        labels = torch.zeros(pipeline.model.num_points).int().cuda()
-        group_masks = [torch.ones(pipeline.model.num_points).bool().cuda()]
+    video_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
+    overlay_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
 
+    while True:
+        if play_checkbox.value:
+            track_slider.value = (track_slider.value + 1) % timesteps
 
-    """
-    INITIALIZE THE TRACKER
-    """
-    @torch.no_grad
-    def composite_vis_frame(target_frame_rgb,outputs):
-        target_vis_frame = resize(target_frame_rgb.permute(2,0,1),(outputs["rgb"].shape[0],outputs["rgb"].shape[1]),antialias=True).permute(1,2,0)
-        # composite the outputs['rgb'] on top of target_vis frame
-        target_vis_frame = target_vis_frame*0.3 + outputs["rgb"].detach()*0.7
-        return target_vis_frame
-
-    optimizer = RigidGroupOptimizer(exp.optimizer_config,pipeline.model,dino_loader,group_masks, group_labels = labels, dataset_scale = pipeline.datamanager.train_dataset._dataparser_outputs.dataparser_scale, render_lock = v.train_lock)
-    rgb_renders = [] 
-    dino_fn = lambda x: dino_loader.get_pca_feats(x, keep_cuda=True)
-    
-    motion_clip = cv2.VideoCapture(str(exp.video_file.absolute()))
-    if not exp.load_keyframes:
-        frame = get_vid_frame(motion_clip,exp.time_bounds[0])
-        target_frame_rgb = ToTensor()(Image.fromarray(frame)).permute(1,2,0).cuda()
-        frame = PosedObservation(target_frame_rgb, init_cam, dino_fn)
-        xs,ys,outputs,renders = optimizer.initialize_obj_pose(frame, render=False, niter=300, n_seeds=5)
-        if len(renders)>1:
-            print("Saving Initialization video...")
-            renders = [r.detach().cpu().numpy()*255 for r in renders]
-            # save video as test_camopt.mp4
-            out_clip = mpy.ImageSequenceClip(renders, fps=30)
-            out_clip.write_videofile(str(exp.output_folder/"test_camopt.mp4"))
-
-        
-        def plotly_render(frame):
-            fig = px.imshow(frame)
+        tstep = track_slider.value
+        part_deltas = optimizer.part_deltas[tstep]
+        viser_rsrd.update_cfg(part_deltas)
+        viser_rsrd.update_hands(tstep)
+        if show_overlay_checkbox.value:
+            video_handle.visible = True
+            overlay_handle.visible = True
+            fig = px.imshow(get_vid_frame(video, frame_idx=tstep))
             fig.update_layout(
-                margin=dict(l=0, r=0, t=0, b=0),showlegend=False,yaxis_visible=False, yaxis_showticklabels=False,xaxis_visible=False, xaxis_showticklabels=False
+                margin=dict(l=0, r=0, t=0, b=0),
+                xaxis=dict(visible=False),
+                yaxis=dict(visible=False),
             )
-            return fig
-        target_vis_frame = composite_vis_frame(target_frame_rgb,outputs)
-        fig = plotly_render(target_vis_frame.cpu().numpy())
-        frame_vis = pipeline.viewer_control.viser_server.add_gui_plotly(fig, 9/16)
-        target_vis_frame_pil = Image.fromarray((target_vis_frame.cpu().numpy()*255).astype(np.uint8))
-        #convert to uint8 
-        target_vis_frame_pil.save(str(exp.output_folder / 'initialized_pose.jpg'))
+            video_handle.figure = fig
 
-        optimizer.register_keyframe(lhands=[],rhands=[])#add a null keyframe to make sure the number of keyframes is aligned with the pose deltas
-        for t in tqdm.tqdm(np.linspace(exp.time_bounds[0],exp.time_bounds[1],int((exp.time_bounds[1]-exp.time_bounds[0])*exp.fps))):
-            frame = get_vid_frame(motion_clip,t)
-            target_frame_rgb = ToTensor()(Image.fromarray(frame)).permute(1,2,0).cuda()
-            optim_frame = PosedObservation(target_frame_rgb, init_cam, dino_fn)
-            optimizer.add_observation(optim_frame)
-            outputs = optimizer.step(50)
-            if exp.detect_hands:
-                lhands,rhands = get_hands(handreg, frame,1/get_depth((target_frame_rgb*255).to(torch.uint8))[...,None],
-                                          optimizer,outputs,optim_frame.frame.camera,v.viser_server)
-            else:
-                lhands,rhands = [],[]
-            optimizer.register_keyframe(lhands = lhands, rhands = rhands)
-            target_vis_frame = composite_vis_frame(target_frame_rgb,outputs)
-            vis_frame = torch.concatenate([outputs["rgb"].detach(),target_vis_frame],dim=1).detach().cpu().numpy()
-            fig = plotly_render(target_vis_frame.detach().cpu().numpy())
-            frame_vis.figure = fig
-            rgb_renders.append(vis_frame*255)
-        #save as an mp4
-        out_clip = mpy.ImageSequenceClip(rgb_renders, fps=exp.fps)
-
-        #save rendering video
-        fname = str(exp.output_folder / "raw_perframe_tracking.mp4")
-        out_clip.write_videofile(fname, fps=exp.fps,codec='libx264')
-        out_clip.write_videofile(fname.replace('.mp4','_mac.mp4'),fps=exp.fps,codec='mpeg4',bitrate='5000k')
-
-        print("Running smoothing...")
-        optimizer.step(all_frames=True,niter=50)
-
-        #save part trajectories
-        optimizer.save_trajectory(exp.output_folder / "keyframes.pt")
-        print("Saved keyframes to",exp.output_folder / "keyframes.pt")
-    if exp.load_keyframes:
-        optimizer.load_trajectory(exp.output_folder / "keyframes.pt")
-    # Populate some viewer elements to visualize the animation
-    animate_button = v.viser_server.gui.add_button("Play Animation")
-    frame_slider = v.viser_server.gui.add_slider("Frame",0,optimizer.part_deltas.shape[0]-1,1,0)
-    smooth_traj_button = v.viser_server.gui.add_button("Smooth Traj (50 Steps)")
-    filename_input = v.viser_server.gui.add_text("File Name","render")
-    render_video_view = v.viser_server.gui.add_checkbox("From Video View",False)
-    status_mkdown = v.viser_server.gui.add_markdown(" ")
-    render_button = v.viser_server.gui.add_button("Render Animation",color='green',icon=viser.Icon.MOVIE)
-    @render_button.on_click
-    def render(_):
-        render_button.disabled = True
-        render_frames = []
-        camera = pipeline.viewer_control.get_camera(1080,1920,0)
-        for i in tqdm.tqdm(range(len(optimizer.sequence))):
-            status_mkdown.content = f"Rendering...{i/len(optimizer.sequence):.01f}"
-            pipeline.model.eval()
-            optimizer.apply_keyframe(i)
-            with torch.no_grad():
-                if render_video_view.value:
-                    obs = optimizer.sequence.get_frame(i)
-                    cam = deepcopy(obs.frame.camera)
-                    cam.rescale_output_resolution(1920/cam.width)
-                    frame_outputs = pipeline.model.get_outputs_for_camera(cam)
-                    target_vis_frame = composite_vis_frame(obs._raw_rgb,frame_outputs)
-                    vis_frame = torch.cat([frame_outputs["rgb"],target_vis_frame],dim=1).detach().cpu().numpy()*255
-                    render_frames.append(vis_frame)
-                else:
-                    outputs = pipeline.model.get_outputs_for_camera(camera)
-                    render_frames.append(outputs["rgb"].detach().cpu().numpy()*255)
-        status_mkdown.content = "Saving..."
-        out_clip = mpy.ImageSequenceClip(render_frames, fps=exp.fps)
-        fname = filename_input.value
-        (exp.output_folder / 'posed_renders').mkdir(exist_ok=True)
-        render_folder = exp.output_folder / 'posed_renders'
-        out_clip.write_videofile(f"{render_folder}/{fname}.mp4", fps=exp.fps,codec='libx264')
-        out_clip.write_videofile(f"{render_folder}/{fname}_mac.mp4", fps=exp.fps,codec='mpeg4',bitrate='5000k')
-        v.viser_server.send_file_download(f"{fname}_mac.mp4",open(f"{render_folder}/{fname}_mac.mp4",'rb').read())
-        status_mkdown.content = "Done!"
-        render_button.disabled = False
-    @animate_button.on_click
-    def play_animation(_):
-        for i in range(optimizer.part_deltas.shape[0]):
-            optimizer.apply_keyframe(i)
-            hands = optimizer.hand_frames[i]
-            for ih,h in enumerate(hands):
-                h_world = h.copy()
-                h_world.apply_transform(optimizer.get_registered_o2w().detach().cpu().numpy())
-                v.viser_server.add_mesh_trimesh(f"hand{ih}",h_world,scale=10)
-            v._trigger_rerender()
-            time.sleep(1/exp.fps)
-    @frame_slider.on_update
-    def apply_keyframe(_):
-        optimizer.apply_keyframe(frame_slider.value)
-        hands = optimizer.hand_frames[frame_slider.value]
-        for ih,h in enumerate(hands):
-            h_world = h.copy()
-            h_world.apply_transform(optimizer.get_registered_o2w().cpu().numpy())
-            v.viser_server.add_mesh_trimesh(f"hand{ih}", h_world, scale=10)
-        v._trigger_rerender()
-    @smooth_traj_button.on_click
-    def smooth_traj(_):
-        if len(optimizer.sequence) == optimizer.part_deltas.shape[0]:
-            optimizer.step(all_frames=True,niter=50)
-            optimizer.save_trajectory(exp.output_folder / "keyframes.pt")
+            fig = px.imshow(get_vid_frame(overlay_video, frame_idx=tstep))
+            fig.update_layout(
+                margin=dict(l=0, r=0, t=0, b=0),
+                xaxis=dict(visible=False),
+                yaxis=dict(visible=False),
+            )
+            overlay_handle.figure = fig
         else:
-            print("Please load all frames first!")
-    animate_traj(optimizer,exp.output_folder, loop_animation=not exp.terminate)
+            video_handle.visible = False
+            overlay_handle.visible = False
+            time.sleep(1/30)
 
-    print("Finished tracking!")
-    while not exp.terminate:
-        time.sleep(.1)
+
+def render_video(
+    optimizer: RigidGroupOptimizer,
+    motion_clip: cv2.VideoCapture,
+    num_frames: int
+):
+    renders = []
+    # Create a render for the video.
+    for frame_id in tqdm.trange(0, num_frames):
+        rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
+        optimizer.apply_keyframe(frame_id)
+        with torch.no_grad():
+            outputs = cast(
+                dict[str, torch.Tensor],
+                optimizer.dig_model.get_outputs(optimizer.sequence[frame_id].frame.camera)
+            )
+        render = (outputs["rgb"].cpu() * 255).numpy().astype(np.uint8)
+        rgb = cv2.resize(rgb, (render.shape[1], render.shape[0]))
+        render = (render * 0.8 + rgb * 0.2).astype(np.uint8)
+        renders.append(render)
+    return renders
+    
+
+# But this should _really_ be in the rigid optimizer.
+def track_and_save_motion(
+    optimizer: RigidGroupOptimizer,
+    motion_clip: cv2.VideoCapture,
+    camera_type: CameraIntr,
+    camopt_render_path: Path,
+    frame_opt_path: Path,
+    track_data_path: Path,
+    save_hand: bool = False,
+):
+    """Get part poses for each frame in the video, ad save the keyframes to a file."""
+    camera = get_ns_camera_at_origin(camera_type)
+    num_frames = int(motion_clip.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    rgb = get_vid_frame(motion_clip, frame_idx=0)
+    obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
+
+    # Initialize.
+    renders = optimizer.initialize_obj_pose(obs, render=True, niter=150, n_seeds=6)
+
+    # Save the frames.
+    out_clip = mpy.ImageSequenceClip(renders, fps=30)
+    out_clip.write_videofile(str(camopt_render_path), codec="libx264",bitrate='5000k')
+    out_clip.write_videofile(str(camopt_render_path).replace('.mp4','_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
+
+    # Add each frame, optimize them separately.
+    renders = []
+    for frame_id in tqdm.trange(0, num_frames):
+        try:
+            rgb = get_vid_frame(motion_clip, frame_idx=frame_id)
+        except ValueError:
+            num_frames = frame_id
+            break
+
+        obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
+        optimizer.add_observation(obs)
+        optimizer.fit([frame_id], 50)
+        if num_frames > 300:
+            obs.clear_cache() # Clear the cache to save memory (can overflow on very long videos)
+
+        if save_hand:
+            optimizer.detect_hands(frame_id)
+    
+    # Save a pre-smoothing video
+    renders = render_video(optimizer, motion_clip, num_frames)
+    out_clip = mpy.ImageSequenceClip(renders, fps=30)
+    out_clip.write_videofile(str(frame_opt_path).replace(".mp4","_pre_smooth.mp4"), codec="libx264",bitrate='5000k')
+    out_clip.write_videofile(str(frame_opt_path).replace('.mp4','_pre_smooth_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
+    
+    # Smooth all frames, together.
+    logger.info("Performing temporal smoothing...")
+    optimizer.fit(list(range(num_frames)), 50)
+    logger.info("Finished temporal smoothing.")
+
+    # Save part trajectories.
+    optimizer.save_tracks(track_data_path)
+
+    renders = render_video(optimizer, motion_clip, num_frames)
+    # Save the final video
+    out_clip = mpy.ImageSequenceClip(renders, fps=30)
+    out_clip.write_videofile(str(frame_opt_path), codec="libx264",bitrate='5000k')
+    out_clip.write_videofile(str(frame_opt_path).replace('.mp4','_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
+
 
 if __name__ == "__main__":
-    wp.init()
     tyro.cli(main)

@@ -821,7 +821,7 @@
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <!-- <mesh filename="package://yumi_description/meshes/gripper/finger.stl"/> -->
-        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_finger.stl"/>
+        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_fingertip.stl"/>
       </geometry>
       <material name="Grey"/>
     </visual>
@@ -829,7 +829,7 @@
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <!-- <mesh filename="package://yumi_description/meshes/gripper/coarse/finger.stl"/> -->
-        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_finger.stl"/>
+        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_fingertip.stl"/>
       </geometry>
       <material name="Grey"/>
     </collision>
@@ -858,7 +858,7 @@
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <!-- <mesh filename="package://yumi_description/meshes/gripper/finger.stl"/> -->
-        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_finger.stl"/>
+        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_fingertip.stl"/>
       </geometry>
       <material name="Grey"/>
     </visual>
@@ -866,7 +866,7 @@
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <!-- <mesh filename="package://yumi_description/meshes/gripper/coarse/finger.stl"/> -->
-        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_finger.stl"/>
+        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_fingertip.stl"/>
       </geometry>
       <material name="Grey"/>
     </collision>
@@ -990,7 +990,7 @@
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <!-- <mesh filename="package://yumi_description/meshes/gripper/finger.stl"/> -->
-        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_finger.stl"/>
+        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_fingertip.stl"/>
       </geometry>
       <material name="Grey"/>
     </visual>
@@ -998,7 +998,7 @@
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <!-- <mesh filename="package://yumi_description/meshes/gripper/coarse/finger.stl"/> -->
-        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_finger.stl"/>
+        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_fingertip.stl"/>
       </geometry>
       <material name="Grey"/>
     </collision>
@@ -1027,7 +1027,7 @@
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <!-- <mesh filename="package://yumi_description/meshes/gripper/finger.stl"/> -->
-        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_finger.stl"/>
+        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_fingertip.stl"/>
       </geometry>
       <material name="Grey"/>
     </visual>
@@ -1035,7 +1035,7 @@
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <!-- <mesh filename="package://yumi_description/meshes/gripper/coarse/finger.stl"/> -->
-        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_finger.stl"/>
+        <mesh filename="package://yumi_description/meshes/gripper/yumi_finray_fingertip.stl"/>
       </geometry>
       <material name="Grey"/>
     </collision>
