@@ -8,6 +8,7 @@ dependencies=[
     "loguru",
     "torch",  # gpu
     "jax",  # gpu
+    "moviepy",
     "kornia",
 ]
 
