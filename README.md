@@ -19,7 +19,7 @@ Once these are installed, install [GARField](https://github.com/chungmin99/garfi
 
 Finally, for robot trajectory optimization, install [JAX](https://jax.readthedocs.io/en/latest/installation.html), with GPU if possible; trajectory remapping optimization heavily relies on batch IK + trajectory solves. Please see [`jaxmp`](https://github.com/chungmin99/jaxmp/tree/main) for installation details.
 
-The system was tested with a RTX 4090, with `torch==2.5.0, jax==0.4.35`, but should work for other versions as well.
+The system was tested with a RTX 4090, with `jax==0.4.35`, but should work for other versions as well.
 
 
 ### Submodule Dependencies
