@@ -26,9 +26,12 @@ Simply `pip install -e .` inside your cloned `rsrd` repo to install.
 
 ### Submodule Dependencies
 Please make sure you `pip` install RSRD before submodules, as it installs some dependencies. There are a number of submodules inside the `dependencies/` folder, which can all be pip installed via
-```cd dependencies/ 
+```
+cd dependencies/ 
 pip install -e dig -e garfield -e raftstereo -e hamer_helper -e jaxls -e jaxmp
 ``` 
+### Hand Detection (Optional for 4D-DPM)
+If you would like to run the full pipeline with robot motion planning, you need to install [HaMeR](https://github.com/geopavlakos/hamer). Please follow the instructions there for how to do this! (it involves downloading model weights).
 
 ### Testing the install
 To catch most install issues, after installation you should be able to run `ns-train garfield -h` and `ns-train dig -h` and see a formatted help output of the two training pipelines.
