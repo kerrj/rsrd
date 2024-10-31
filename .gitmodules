@@ -16,3 +16,6 @@
 [submodule "dependencies/jaxls"]
 	path = dependencies/jaxls
 	url = git@github.com:chungmin99/jaxls.git
+[submodule "dependencies/garfield"]
+	path = dependencies/garfield
+	url = https://github.com/chungmin99/garfield
