@@ -21,12 +21,11 @@ Finally, for robot trajectory optimization, install [JAX](https://jax.readthedoc
 
 The system was tested with a RTX 4090, with `jax==0.4.35`, but should work for other versions as well.
 
-
-### Submodule Dependencies
-There are a number of submodules inside the `dependencies/` folder, which can all be pip installed via `pip install -e .`
-
 ### Install RSRD
 Simply `pip install -e .` inside your cloned `rsrd` repo to install. 
+
+### Submodule Dependencies
+There are a number of submodules inside the `dependencies/` folder, which can all be pip installed via `pip install -e .` Please make sure you `pip` install RSRD before submodules, as it installs some dependencies.
 
 ### Testing the install
 To catch most install issues, after installation you should be able to run `ns-train garfield -h` and `ns-train dig -h` and see a formatted help output of the two training pipelines.
