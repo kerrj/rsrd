@@ -118,54 +118,6 @@ class Hand3DDetector:
             hand_outputs['keypoints_3d'][i][:, 2] -= hand_offset
         return hand_outputs
 
-        # # Get shift/scale for matching monodepth to object depth.
-        # monodepth_scale = rendered_scaled_depth[object_mask].std() / monodepth[object_mask].std()
-        # monodepth_aligned = (
-        #     monodepth - monodepth[object_mask].mean()
-        # ) * monodepth_scale + rendered_scaled_depth[object_mask].mean()
-
-        # num_hands = hand_outputs["verts"].shape[0]
-        # _hand_outputs = deepcopy(hand_outputs)
-        # for hand_idx in range(num_hands):
-        #     # hands.append(
-        #     hand_shift = cls._get_aligned_hand_3d_shift(
-        #         hand_outputs,
-        #         hand_idx,
-        #         monodepth_aligned,
-        #         focal_length,
-        #     )
-        #     hand_shift_vec = -np.array([0, 0, hand_shift])
-        #     _hand_outputs["verts"][hand_idx] = hand_outputs["verts"][hand_idx] + hand_shift_vec
-        #     _hand_outputs["keypoints_3d"][hand_idx] = hand_outputs["keypoints_3d"][hand_idx] + hand_shift_vec
-
-        # return _hand_outputs
-    
-    # @classmethod
-    # def _get_aligned_hand_3d_shift(
-    #     cls,
-    #     hand_output: HandOutputsWrtCamera,
-    #     hand_idx: int,
-    #     monodepth_aligned: torch.Tensor,
-    #     focal_length: float,
-    # ) -> float:
-    #     # Get the hand depth.
-    #     rgb, hand_depth, hand_mask = cast(
-    #         HamerHelper, cls.hamer_helper.retrieve()
-    #     ).render_detection(
-    #         hand_output,
-    #         hand_idx,
-    #         monodepth_aligned.shape[0],
-    #         monodepth_aligned.shape[1],
-    #         focal_length,
-    #     )
-    #     hand_depth = torch.from_numpy(hand_depth).cuda().float()
-    #     hand_mask = torch.from_numpy(hand_mask).cuda()
-
-    #     # Get shift (no scale!) to match hand depth to monodepth.
-    #     hand_shift = (hand_depth[hand_mask].mean() - monodepth_aligned[hand_mask].mean()).item()
-    #     return hand_shift
-
-
 class MonoDepthEstimator:
     image_processor = Future(lambda: AutoImageProcessor.from_pretrained(
         "depth-anything/Depth-Anything-V2-Base-hf"
