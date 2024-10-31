@@ -8,7 +8,11 @@ from copy import deepcopy
 from rsrd.util.common import crop_camera
 from rsrd.util.frame_detectors import Hand2DDetector, Hand3DDetector, MonoDepthEstimator
 from rsrd.transforms import SO3
-from hamer_helper import HandOutputsWrtCamera
+
+try:
+    from hamer_helper import HandOutputsWrtCamera
+except ModuleNotFoundError:
+    HandOutputsWrtCamera = None
 
 if TYPE_CHECKING:
     from rsrd.motion.motion_optimizer import RigidGroupOptimizer
@@ -105,7 +109,7 @@ class Frame:
     @torch.no_grad()
     def get_hand_3d(
         self, object_mask: torch.Tensor, rendered_depth: torch.Tensor, dataset_scale: float
-    ) -> tuple[HandOutputsWrtCamera | None, HandOutputsWrtCamera | None]:
+    ) -> tuple[Optional[HandOutputsWrtCamera], Optional[HandOutputsWrtCamera]]:
         """
         Get the 3D hand meshes, as well as their right/left status.
         """
