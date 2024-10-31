@@ -19,7 +19,7 @@ Once these are installed, install [GARField](https://github.com/chungmin99/garfi
 
 Finally, for robot trajectory optimization, install [JAX](https://jax.readthedocs.io/en/latest/installation.html), with GPU if possible; trajectory remapping optimization heavily relies on batch IK + trajectory solves. Please see [`jaxmp`](https://github.com/chungmin99/jaxmp/tree/main) for installation details.
 
-The system was tested with a RTX 4090, with `torch==2.5.0, jax==0.4.35`, but should work for other versions as well.
+The system was tested with a RTX 4090, with `jax==0.4.35`, but should work for other versions as well.
 
 
 ### Submodule Dependencies
@@ -29,7 +29,7 @@ There are a number of submodules inside the `dependencies/` folder, which can al
 To catch most install issues, after installation you should be able to run `ns-train garfield -h` and `ns-train dig -h` and see a formatted help output of the two training pipelines.
 
 ## Running 4D-DPM
-We have published data to reproduce the paper results [here](TODO). They consist of a multi-view scan in nerfstudio format, and a `.mp4` video of the input demonstration.
+We have published data to reproduce the paper results [on our site]([TODO](https://robot-see-robot-do.github.io/)). They consist of a multi-view scan in nerfstudio format, and a `.mp4` video of the input demonstration.
 
 ### Custom data
 To capture your own objects, please first scan an object of interest as described [here](https://docs.nerf.studio/quickstart/custom_dataset.html).
