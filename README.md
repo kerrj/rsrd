@@ -29,7 +29,7 @@ There are a number of submodules inside the `dependencies/` folder, which can al
 To catch most install issues, after installation you should be able to run `ns-train garfield -h` and `ns-train dig -h` and see a formatted help output of the two training pipelines.
 
 ## Running 4D-DPM
-We have published data to reproduce the paper results [here](TODO). They consist of a multi-view scan in nerfstudio format, and a `.mp4` video of the input demonstration.
+We have published data to reproduce the paper results [on our site]([TODO](https://robot-see-robot-do.github.io/)). They consist of a multi-view scan in nerfstudio format, and a `.mp4` video of the input demonstration.
 
 ### Custom data
 To capture your own objects, please first scan an object of interest as described [here](https://docs.nerf.studio/quickstart/custom_dataset.html).
