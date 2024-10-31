@@ -4,7 +4,6 @@ version = "0.0.1"
 
 dependencies=[
     "nerfstudio",
-    "hamer",
     "loguru",
     "torch",  # gpu
     "jax",  # gpu
