@@ -48,7 +48,7 @@ To capture your own objects, please first scan an object of interest as describe
 <img src="assets/dig_gui.png" width="50%" alt="image">
 First we need to segment the model. To do this, click on the "Click" button, then click inside the viewer window to select a point in 3D. Next, click "Crop to Click". You should see a result like this:
 <img src="assets/dig_crop1.png" width="50%" alt="image">
-Next adjust the scale until only the object is segmented, like this:
+Next adjust the group level until only the object is segmented, like this:
 <img src="assets/dig_crop2.png" width="50%" alt="image">
 Finally, switch to "Cluster" mode, then click "Cluster Scene". For best results pick a scale such that the fewest parts are segmented, with just the part of interest remaining. You can cluster as many times as you want, the final clusters are saved for use in the motion recovery stage of the pipeline.
 <img src="assets/dig_cluster.png" width="50%" alt="image">
