@@ -14,7 +14,7 @@ Clone this repo with `git clone --recursive https://github.com/kerrj/rsrd`, whic
 ### Outside Dependencies
 First please install PyTorch 2.1.2 in a python 3.10 conda env with cuda version 12.0 (should also work with different torch versions but this is what we've tested). Next, install [nerfstudio](https://github.com/nerfstudio-project/nerfstudio) and [gsplat](https://github.com/nerfstudio-project/gsplat) using the instructions provided in their documentation. We use `nerfstudio` version 1.1.4 and `gsplat` version 1.4.0.
 
-Once these are installed, install [GARField](https://github.com/chungmin99/garfield), which should simply be pip installable except for [cuML](https://docs.rapids.ai/install/), which can be pip installed with 
+Once these are installed, install [GARField](https://github.com/chungmin99/garfield) (included inside `dependencies/`), which should simply be pip installable except for [cuML](https://docs.rapids.ai/install/), which can be pip installed with 
 `pip install --extra-index-url=https://pypi.nvidia.com cudf-cu12==24.10.* cuml-cu12==24.10.*`
 
 Finally, for robot trajectory optimization, install [JAX](https://jax.readthedocs.io/en/latest/installation.html), with GPU if possible; trajectory remapping optimization heavily relies on batch IK + trajectory solves. Please see [`jaxmp`](https://github.com/chungmin99/jaxmp/tree/main) for installation details.
