@@ -143,6 +143,7 @@ def main(
     T_cam_obj = (
         T_cam_obj @
         tf.SE3.from_rotation(tf.SO3.from_x_radians(torch.Tensor([torch.pi]).cuda()))
+        @ tf.SE3.from_rotation(tf.SO3.from_z_radians(torch.Tensor([torch.pi]).cuda()))
     )
     hands = optimizer.hands_info
     assert hands is not None
@@ -187,15 +188,24 @@ def main(
     while True:
         if play_checkbox.value:
             track_slider.value = (track_slider.value + 1) % timesteps
-
         tstep = track_slider.value
+        vid_frame = get_vid_frame(video, frame_idx=tstep)
         part_deltas = optimizer.part_deltas[tstep]
         viser_rsrd.update_cfg(part_deltas)
         viser_rsrd.update_hands(tstep)
+        camera_handle = server.scene.add_camera_frustum(
+            "camera",
+            fov=80,
+            aspect=width / height,
+            scale=0.05,
+            position=T_cam_obj.translation().detach().cpu().numpy().squeeze(),
+            wxyz=T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze(),
+            image = vid_frame
+        )
         if show_overlay_checkbox.value:
             video_handle.visible = True
             overlay_handle.visible = True
-            fig = px.imshow(get_vid_frame(video, frame_idx=tstep))
+            fig = px.imshow(vid_frame)
             fig.update_layout(
                 margin=dict(l=0, r=0, t=0, b=0),
                 xaxis=dict(visible=False),
@@ -203,7 +213,7 @@ def main(
             )
             video_handle.figure = fig
 
-            fig = px.imshow(get_vid_frame(overlay_video, frame_idx=tstep))
+            fig = px.imshow(vid_frame)
             fig.update_layout(
                 margin=dict(l=0, r=0, t=0, b=0),
                 xaxis=dict(visible=False),
