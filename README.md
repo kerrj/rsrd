@@ -89,7 +89,38 @@ https://github.com/user-attachments/assets/343e0176-975e-4ece-b32e-20815b2053f0
 * `keyframes.txt`: a loadable representation of the tracked part poses
 
 ### Running the robot visualizer
-**TODO** CMK fill in
+For object-centric robot trajectory generation, you need to specify:
+* how many hands to use (`single` or `bimanual`), and
+* the initial object position, from which the robot will plan the part motion trajectory.
+
+There are two options to initialize the object position:
+1. Interactively set the object into an initial position, or
+2. (Requires [ZED SDK](https://www.stereolabs.com/developers/release)) Use an example ZED observation from the robot POV at [`data/robot_init_obs`](https://github.com/kerrj/rsrd/tree/main/data/robot_init_obs).
+
+```
+usage: run_planner.py [-h] --hand-mode {single,bimanual} --track-dir PATH [--zed-video-path {None}|PATH]
+
+╭─ options ───────────────────────────────────────────────╮
+│ -h, --help              show this help message and exit │
+│ --hand-mode {single,bimanual}                           │
+│                         (required)                      │
+│ --track-dir PATH        (required)                      │
+│ --zed-video-path {None}|PATH                            │
+│                         (default: None)                 │
+╰─────────────────────────────────────────────────────────╯
+```
+Set `--track-dir` to `--output-dir` as specified from `run_tracker.py`.
+
+If you don't provide `--zed-video-path` (option 1), you need to drag the object into a desired location, fix the object location (unclick "Move object") and click "Generate Trajectory". Otherwise, the script will start trajectory generation immediately after the object is registered into the workspace.
+
+https://github.com/user-attachments/assets/d316d48e-4ff7-44f3-89d2-6a65411ac902
+
+Example output: 
+
+https://github.com/user-attachments/assets/c0a606a1-0ccf-4c2b-b4a4-c20df8e1d2c2
+
+For option 1, you can now un-click "Move Object" to re-generate trajectories from a new object pose, or click "Generate Trajectory" again for more.
+
 
 ## Bibtex
 If you find this useful, please cite the paper!
