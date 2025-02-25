@@ -9,6 +9,8 @@ dependencies=[
     "jax",  # gpu
     "moviepy",
     "kornia",
+    "jaxls @ git+https://github.com/chungmin99/jaxls@py310",
+    "jaxmp @ git+https://github.com/chungmin99/jaxmp@b1bfb99a1946ab7d177801758201f930aa179769",
 ]
 
 # need python3.12 (for jaxls)
